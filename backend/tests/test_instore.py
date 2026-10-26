@@ -65,3 +65,35 @@ def test_shopping_route_flags_stock_problems(client):
     items = [{"product_id": product["id"], "quantity": product["stock"] + 1}]
     body = client.post(f"/api/stores/{STORE_ID}/instore/list", json={"items": items}).json()
     assert body["issues"] and "left in stock" in body["issues"][0]
+
+
+def _sell_out(db, name):
+    from sqlalchemy import select
+
+    from app.models import Inventory, Product
+
+    inv = db.scalars(
+        select(Inventory).join(Product).where(Inventory.store_id == STORE_ID, Product.name == name)
+    ).one()
+    inv.stock = 0
+    db.commit()
+    return inv.product_id
+
+
+def test_sold_out_items_stay_listed_but_are_not_charged(client, db):
+    sold_out = _sell_out(db, "Britannia Brown Bread")
+    other = in_stock_products(client, count=1)[0]
+    items = [{"product_id": sold_out, "quantity": 1}, {"product_id": other["id"], "quantity": 2}]
+    body = client.post(f"/api/stores/{STORE_ID}/instore/list", json={"items": items}).json()
+
+    lines = {l["product"]["id"]: l for l in body["lines"]}
+    assert lines[sold_out]["available_quantity"] == 0 and lines[sold_out]["line_total_paise"] == 0
+    assert body["bill"]["total_paise"] == other["price_paise"] * 2
+    assert any("out of stock" in issue for issue in body["issues"])
+
+
+def test_sold_out_match_suggests_in_stock_alternatives(client, db):
+    _sell_out(db, "Britannia Brown Bread")
+    match = client.post(f"/api/stores/{STORE_ID}/instore/match", json={"text": "brown bread"}).json()["matches"][0]
+    assert match["product"]["name"] == "Britannia Brown Bread"
+    assert any(alt["in_stock"] and "Bread" in alt["name"] for alt in match["alternatives"])

@@ -246,6 +246,8 @@ class InStoreListRequest(BaseModel):
 class InStoreLine(BaseModel):
     product: ProductOut
     quantity: int
+    # How many of `quantity` can actually be bought; only these count towards the bill.
+    available_quantity: int
     line_total_paise: int
     line_mrp_paise: int
 

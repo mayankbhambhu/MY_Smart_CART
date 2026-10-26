@@ -18,7 +18,7 @@ from ..schemas import (
 )
 from ..services.catalog import product_out, store_inventory
 from ..services.geo import delivery_eta_minutes, haversine_km, is_store_open
-from ..services.orders import resolve_lines, totals
+from ..services.orders import resolve_lines
 from ..services.pricing import compute_bill
 from ..services.search import parse_shopping_list, rank_products
 from ..services.slots import pickup_slots
@@ -104,6 +104,9 @@ def match_shopping_list(store_id: int, body: InStoreMatchRequest, db: Session = 
         top_score = max(s for _, s in ranked)
         # Only offer alternatives that are nearly as good a match ("milk" -> other milks, not dals).
         close = [p for p, s in ranked if s >= top_score * 0.6]
+        if close[0].id not in in_stock:
+            noun = item.query.split()[-1]
+            close += [p for p, _ in rank_products(products, noun, in_stock=in_stock, limit=5) if p not in close]
         best, *others = [product_out(p, inventory[p.id]) for p in close]
         matches.append(InStoreMatch(query=item.query, quantity=item.quantity, product=best, alternatives=others))
     return InStoreMatchResponse(matches=matches, unmatched=unmatched)
@@ -115,18 +118,25 @@ def shopping_route(store_id: int, body: InStoreListRequest, db: Session = Depend
     store = _get_store(db, store_id)
     lines, issues = resolve_lines(db, store.id, body.items)
     lines.sort(key=lambda line: (line.inventory.aisle.number, line.inventory.row_number, line.inventory.product.name))
-    item_total, mrp_total = totals(lines)
+    out: list[InStoreLine] = []
+    item_total = mrp_total = 0
+    for line in lines:
+        product = line.inventory.product
+        buyable = min(line.quantity, max(line.available, 0))
+        item_total += product.price_paise * buyable
+        mrp_total += product.mrp_paise * buyable
+        out.append(
+            InStoreLine(
+                product=product_out(product, line.inventory),
+                quantity=line.quantity,
+                available_quantity=buyable,
+                line_total_paise=product.price_paise * buyable,
+                line_mrp_paise=product.mrp_paise * buyable,
+            )
+        )
     return InStoreListResponse(
         store=_layout(store),
-        lines=[
-            InStoreLine(
-                product=product_out(line.inventory.product, line.inventory),
-                quantity=line.quantity,
-                line_total_paise=line.inventory.product.price_paise * line.quantity,
-                line_mrp_paise=line.inventory.product.mrp_paise * line.quantity,
-            )
-            for line in lines
-        ],
+        lines=out,
         bill=compute_bill(Fulfillment.IN_STORE, item_total, mrp_total),
         issues=issues,
     )
