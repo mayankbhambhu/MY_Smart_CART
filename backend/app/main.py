@@ -55,7 +55,8 @@ def mount_frontend(app: FastAPI, dist: Path) -> None:
     if (dist / "assets").is_dir():
         app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
 
-    @app.get("/{full_path:path}", include_in_schema=False)
+    # HEAD too: uptime monitors (often used to keep a free instance awake) send HEAD requests.
+    @app.api_route("/{full_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
     def spa(full_path: str):
         if full_path.startswith("api/"):
             return JSONResponse({"detail": "Not found"}, status_code=404)

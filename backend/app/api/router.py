@@ -7,7 +7,7 @@ from app.schemas.payment import PaymentsConfig, PublicConfig
 api_router = APIRouter()
 
 
-@api_router.get("/health", tags=["meta"])
+@api_router.api_route("/health", methods=["GET", "HEAD"], tags=["meta"])
 def health():
     return {"status": "ok"}
 

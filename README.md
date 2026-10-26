@@ -5,6 +5,8 @@ A quick-commerce app in the style of Blinkit / Zepto, with a **Python (FastAPI) 
 - **Scheduled pickup**: order in the app, choose a time slot, and collect from the store with no delivery fee.
 - **In-store shopping**: tell the app what you want (type it or say it). It shows where each item is, like **Aisle 4 · Row 2**, gives you the best walking route and keeps a running **total**. Pay at the counter with a QR bill, or in the app.
 
+**Live demo:** <https://smart-cart-imbj.onrender.com>. It runs on Render's free plan, so the first visit after a quiet spell can take about a minute. Login codes show on screen and payments are simulated.
+
 ![Home, scheduled pickup, in-store aisle list and store map](docs/app-screens.png)
 
 ## Features

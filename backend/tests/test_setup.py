@@ -3,11 +3,13 @@
 from datetime import timedelta
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from app.core.config import Settings, get_settings
 from app.core.types import utcnow
-from app.main import _housekeeping
+from app.main import _housekeeping, mount_frontend
 from app.manage import set_role
 from app.models import OtpRequest, Store, User
 from app.seed import disable_demo_staff, grant_admins
@@ -89,3 +91,21 @@ def test_housekeeping_clears_old_login_codes(db):
     db.commit()
     _housekeeping()
     assert db.scalar(select(func.count()).select_from(OtpRequest)) == 1
+
+
+def test_built_web_app_is_served_for_get_and_head(tmp_path, client):
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "index.html").write_text("<!doctype html><title>Smart Cart</title>")
+    (tmp_path / "favicon.svg").write_text("<svg/>")
+    (tmp_path.parent / "secret.txt").write_text("nope")
+    app = FastAPI()
+    mount_frontend(app, tmp_path)
+    web = TestClient(app)
+
+    for path in ("/", "/orders/12", "/favicon.svg"):
+        assert web.get(path).status_code == 200
+        assert web.head(path).status_code == 200
+    assert "Smart Cart" in web.get("/orders/12").text  # client-side routes get the app
+    assert web.get("/api/nope").status_code == 404
+    assert "nope" not in web.get("/../secret.txt").text
+    assert client.head("/api/health").status_code == 200
