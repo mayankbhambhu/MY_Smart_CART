@@ -36,13 +36,19 @@ class Settings(BaseSettings):
     # Backstop against SMS-pumping fraud: no more login codes than this per hour, all numbers together.
     otp_max_per_hour: int = 300
     # How login codes reach people. "console" logs the code and shows it on the login screen
-    # (development/demo only). "msg91" (India, DLT-registered template) or "twilio" send an SMS.
-    sms_provider: Literal["console", "msg91", "twilio"] = "console"
+    # (development/demo only). "msg91" (India, your DLT-registered template) or "twilio" send our
+    # code by SMS. "messagecentral" (VerifyNow) sends and checks its own code from its own approved
+    # template, so it works without your own DLT registration.
+    sms_provider: Literal["console", "msg91", "twilio", "messagecentral"] = "console"
     msg91_auth_key: str | None = None
     msg91_otp_template_id: str | None = None
     twilio_account_sid: str | None = None
     twilio_auth_token: str | None = None
     twilio_from: str | None = None  # sender number (+1...) or Messaging Service SID (MG...)
+    messagecentral_customer_id: str | None = None  # e.g. C-1A2B3C4D5E6F7G8
+    messagecentral_password: str | None = None  # your Message Central password (sent base64-encoded)
+    messagecentral_email: str | None = None  # the account's email, if your dashboard asks for it
+    messagecentral_api_base: str = "https://cpaas.messagecentral.com"
     # Optional: lets Chrome on Android fill the code in automatically (WebOTP), e.g. "smartcart.in".
     webotp_domain: str | None = None
 
@@ -68,6 +74,15 @@ class Settings(BaseSettings):
     pickup_days_ahead: int = 3
     # Moves orders through their statuses over time so tracking can be demoed without a store team.
     simulate_order_progress: bool = True
+    # Who runs the shop. Shown on the policy pages Razorpay checks before activating live payments
+    # (and required by India's e-commerce rules), so production refuses to start without them.
+    business_legal_name: str | None = None  # e.g. "Sharma Retail Pvt Ltd" or your own name
+    business_address: str | None = None
+    support_email: str | None = None
+    support_phone: str | None = None
+    grievance_officer: str | None = None  # name of the person who handles complaints
+    gstin: str | None = None  # optional
+
     # Comma-separated mobile numbers that get the admin role on startup (e.g. "98XXXXXXXX,97XXXXXXXX").
     # Handy on hosts without shell access. Only meaningful with real SMS: with codes on screen anyone
     # can log in as any number.
@@ -78,16 +93,34 @@ class Settings(BaseSettings):
 
     @field_validator("database_url")
     @classmethod
-    def _postgres_driver(cls, value: str) -> str:
-        """Hosts hand out postgres:// URLs; SQLAlchemy needs to be told to use psycopg 3."""
+    def _database_driver(cls, value: str) -> str:
+        """Hosts hand out postgres:// or mysql:// URLs; SQLAlchemy needs to be told which driver to use
+        (psycopg 3 / PyMySQL). MySQL also needs utf8mb4 so emoji and Hindi text are stored intact."""
         for prefix in ("postgres://", "postgresql://"):
             if value.startswith(prefix):
                 return "postgresql+psycopg://" + value[len(prefix) :]
+        for prefix in ("mysql://", "mariadb://"):
+            if value.startswith(prefix):
+                value = "mysql+pymysql://" + value[len(prefix) :]
+        if value.startswith("mysql+pymysql://") and "charset=" not in value:
+            value += ("&" if "?" in value else "?") + "charset=utf8mb4"
         return value
 
     @property
     def otp_on_screen(self) -> bool:
         return self.sms_provider == "console"
+
+    @property
+    def otp_resend_cooldown(self) -> int:
+        # VerifyNow refuses a new code for a number while the previous one (60 s) is still open.
+        if self.sms_provider == "messagecentral":
+            return max(self.otp_resend_cooldown_seconds, 60)
+        return self.otp_resend_cooldown_seconds
+
+    @property
+    def auto_progress_orders(self) -> bool:
+        """Demo convenience only: with real customers, orders move when the store team moves them."""
+        return self.simulate_order_progress and self.environment != "production"
 
     @property
     def payment_provider(self) -> Literal["razorpay", "simulated"] | None:
@@ -111,9 +144,38 @@ class Settings(BaseSettings):
             raise RuntimeError("Set both RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET (or neither).")
         if self.environment not in LOCAL_ENVIRONMENTS and self.secret_key == DEFAULT_SECRET:
             raise RuntimeError("Set SECRET_KEY to a long random value for any hosted deployment.")
-        if self.environment == "production" and self.otp_on_screen:
+        if self.sms_provider == "messagecentral" and not (
+            self.messagecentral_customer_id and self.messagecentral_password
+        ):
             raise RuntimeError(
-                "Production needs SMS_PROVIDER=msg91 or twilio so login codes are sent by SMS."
+                "SMS_PROVIDER=messagecentral needs MESSAGECENTRAL_CUSTOMER_ID and MESSAGECENTRAL_PASSWORD."
+            )
+        if self.environment != "production":
+            return
+        if self.otp_on_screen:
+            raise RuntimeError(
+                "Production needs SMS_PROVIDER=messagecentral, msg91 or twilio so login codes are sent "
+                "by SMS."
+            )
+        if self.database_url.startswith("sqlite"):
+            raise RuntimeError(
+                "Production needs DATABASE_URL pointing at PostgreSQL: orders and payments must survive "
+                "restarts."
+            )
+        missing = [
+            name.upper()
+            for name in (
+                "business_legal_name",
+                "business_address",
+                "support_email",
+                "support_phone",
+                "grievance_officer",
+            )
+            if not getattr(self, name)
+        ]
+        if missing:
+            raise RuntimeError(
+                f"Production needs your business details for the policy pages: {', '.join(missing)}."
             )
 
 

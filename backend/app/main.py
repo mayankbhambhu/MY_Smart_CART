@@ -18,6 +18,7 @@ from app.core.errors import AppError, app_error_handler
 from app.core.ratelimit import SlidingWindowLimiter
 from app.core.types import utcnow
 from app.models import OtpRequest
+from app.policies import mount_policy_pages
 from app.seed import init_db
 from app.services.payments import expire_unpaid_orders
 
@@ -95,6 +96,7 @@ def create_app() -> FastAPI:
     app.add_exception_handler(AppError, app_error_handler)
     app.state.otp_ip_limiter = SlidingWindowLimiter(settings.otp_max_per_ip_per_hour, 3600)
     app.include_router(api_router, prefix="/api")
+    mount_policy_pages(app)  # before the web app's catch-all route
     mount_frontend(app, (BACKEND_DIR / settings.frontend_dist).resolve())
     return app
 

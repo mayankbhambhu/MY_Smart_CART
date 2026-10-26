@@ -2,7 +2,7 @@ from fastapi import APIRouter
 
 from app.api.routes import addresses, auth, cart, catalog, instore, orders, payments, staff, stores
 from app.core.config import get_settings
-from app.schemas.payment import PaymentsConfig, PublicConfig
+from app.schemas.payment import BusinessInfo, PaymentsConfig, PublicConfig
 
 api_router = APIRouter()
 
@@ -20,6 +20,11 @@ def public_config():
     key_id = settings.razorpay_key_id if provider == "razorpay" else None
     return PublicConfig(
         app_name=settings.app_name,
+        business=BusinessInfo(
+            legal_name=settings.business_legal_name,
+            support_email=settings.support_email,
+            support_phone=settings.support_phone,
+        ),
         otp_delivery="screen" if settings.otp_on_screen else "sms",
         payments=PaymentsConfig(
             online=provider is not None,

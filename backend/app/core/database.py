@@ -14,7 +14,12 @@ class Base(DeclarativeBase):
 def make_engine(url: str) -> Engine:
     if not url.startswith("sqlite"):
         # Hosted databases drop idle connections; check each one before handing it out.
-        return create_engine(url, pool_pre_ping=True, pool_recycle=300)
+        options = {"pool_pre_ping": True, "pool_recycle": 300}
+        if url.startswith("mysql"):
+            # PostgreSQL's default isolation, which the order/payment concurrency handling assumes
+            # (MySQL's REPEATABLE READ would keep showing a transaction its first snapshot).
+            options["isolation_level"] = "READ COMMITTED"
+        return create_engine(url, **options)
 
     engine = create_engine(url, connect_args={"check_same_thread": False})
 

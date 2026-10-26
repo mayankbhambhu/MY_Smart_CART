@@ -29,6 +29,7 @@ export interface User {
 
 export interface AppConfig {
   app_name: string
+  business: { legal_name: string | null; support_email: string | null; support_phone: string | null }
   /** 'screen': demo deployment, the code is shown on the login screen instead of sent by SMS. */
   otp_delivery: 'sms' | 'screen'
   payments: {

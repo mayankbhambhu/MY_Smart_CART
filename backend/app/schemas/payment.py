@@ -55,8 +55,15 @@ class PaymentsConfig(Schema):
     test_mode: bool
 
 
+class BusinessInfo(Schema):
+    legal_name: str | None
+    support_email: str | None
+    support_phone: str | None
+
+
 class PublicConfig(Schema):
     app_name: str
+    business: BusinessInfo
     otp_delivery: Literal["sms", "screen"]
     payments: PaymentsConfig
     payment_timeout_minutes: int

@@ -17,7 +17,7 @@ from app.core.security import (
 from app.core.types import utcnow
 from app.models import OtpRequest, User
 from app.schemas.auth import OtpRequestIn, OtpRequestOut, OtpVerifyIn, TokenOut, UserOut, UserUpdate
-from app.services.sms import SmsError, masked, send_otp
+from app.services.sms import SmsError, check_otp, masked, send_otp
 
 logger = logging.getLogger("smartcart.auth")
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -46,7 +46,7 @@ def request_otp(body: OtpRequestIn, request: Request, db: DbSession):
         .order_by(OtpRequest.id.desc())
     ).all()
     if recent:
-        wait = settings.otp_resend_cooldown_seconds - int((now - recent[0]).total_seconds())
+        wait = settings.otp_resend_cooldown - int((now - recent[0]).total_seconds())
         if wait > 0:
             raise AppError(429, f"Please wait {wait}s before requesting a new OTP", {"retry_after": wait})
     if len(recent) >= settings.otp_max_per_phone_per_hour:
@@ -60,7 +60,7 @@ def request_otp(body: OtpRequestIn, request: Request, db: DbSession):
 
     code = generate_numeric_code(settings.otp_length)
     try:
-        send_otp(phone, code)
+        reference = send_otp(phone, code)  # set when the provider checks its own code
     except SmsError:
         logger.exception("Couldn't send a login code to %s", masked(phone))
         raise AppError(502, "We couldn't send the SMS right now. Please try again in a minute.") from None
@@ -70,6 +70,7 @@ def request_otp(body: OtpRequestIn, request: Request, db: DbSession):
         OtpRequest(
             phone=phone,
             code_hash=hash_otp(phone, code),
+            provider_ref=reference,
             created_at=now,
             expires_at=now + timedelta(seconds=settings.otp_ttl_seconds),
         )
@@ -78,7 +79,7 @@ def request_otp(body: OtpRequestIn, request: Request, db: DbSession):
     return OtpRequestOut(
         phone=phone,
         expires_in=settings.otp_ttl_seconds,
-        resend_in=settings.otp_resend_cooldown_seconds,
+        resend_in=settings.otp_resend_cooldown,
         delivery="screen" if settings.otp_on_screen else "sms",
         dev_otp=code if settings.otp_on_screen else None,
     )
@@ -97,7 +98,22 @@ def verify_otp(body: OtpVerifyIn, db: DbSession):
         raise AppError(400, "OTP expired. Please request a new one.")
     if otp.attempts >= settings.otp_max_attempts:
         raise AppError(429, "Too many incorrect attempts. Please request a new OTP.")
-    if not otp_matches(phone, body.otp, otp.code_hash):
+    if otp.provider_ref:
+        try:
+            outcome = check_otp(phone, otp.provider_ref, body.otp)
+        except SmsError:
+            logger.exception("Couldn't check a login code for %s", masked(phone))
+            raise AppError(
+                502, "We couldn't check the code right now. Please try again in a minute."
+            ) from None
+        if outcome == "expired":
+            otp.expires_at = now
+            db.commit()
+            raise AppError(400, "OTP expired. Please request a new one.")
+        correct = outcome == "ok"
+    else:
+        correct = otp_matches(phone, body.otp, otp.code_hash)
+    if not correct:
         otp.attempts += 1
         db.commit()
         raise AppError(400, "Incorrect OTP. Please try again.")

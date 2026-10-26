@@ -287,7 +287,7 @@ def simulate_progress(db: Session, order: Order, now: datetime | None = None) ->
     """Demo mode: walk delivery/pickup orders through their statuses on a realistic clock.
     Pickup orders still need the PIN handover at the store to be marked picked up."""
     flow = FLOWS[F(order.fulfillment_type)]
-    if not get_settings().simulate_order_progress or S(order.status) not in flow:
+    if not get_settings().auto_progress_orders or S(order.status) not in flow:
         return False
     if order.status in FINAL_STATUSES:
         return False

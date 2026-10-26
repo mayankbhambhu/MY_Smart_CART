@@ -350,6 +350,52 @@ function BottomNav() {
   )
 }
 
+// Server-rendered pages (backend/app/policies.py), so plain links rather than router links.
+const POLICY_LINKS = [
+  ['/terms', 'Terms'],
+  ['/privacy', 'Privacy'],
+  ['/refund-policy', 'Cancellations & refunds'],
+  ['/shipping-policy', 'Shipping & delivery'],
+  ['/pricing', 'Pricing & fees'],
+  ['/contact', 'Contact us'],
+] as const
+const THIS_YEAR = new Date().getFullYear()
+
+function SiteFooter() {
+  const config = useAppConfig().data
+  const business = config?.business
+  return (
+    <footer className="mt-10 border-t border-black/5 px-4 pt-6 text-xs text-gray-500">
+      <nav aria-label="Policies" className="flex flex-wrap gap-x-4 gap-y-2">
+        {POLICY_LINKS.map(([href, label]) => (
+          <a key={href} href={href} className="font-semibold text-gray-600 hover:text-ink">
+            {label}
+          </a>
+        ))}
+      </nav>
+      <p className="mt-3">
+        © {THIS_YEAR} {business?.legal_name ?? config?.app_name ?? 'Smart Cart'}
+        {business?.support_email && (
+          <>
+            {' · '}
+            <a href={`mailto:${business.support_email}`} className="whitespace-nowrap hover:text-ink">
+              {business.support_email}
+            </a>
+          </>
+        )}
+        {business?.support_phone && (
+          <>
+            {' · '}
+            <a href={`tel:${business.support_phone.replace(/\s/g, '')}`} className="whitespace-nowrap hover:text-ink">
+              {business.support_phone}
+            </a>
+          </>
+        )}
+      </p>
+    </footer>
+  )
+}
+
 /** Tells testers what isn't real on this deployment. */
 function DemoBanner() {
   const config = useAppConfig().data
@@ -370,6 +416,7 @@ export function AppShell() {
         <Header />
         <main className="mx-auto max-w-6xl pb-40 md:pb-16">
           <Outlet />
+          <SiteFooter />
         </main>
         <CartBar />
         <BottomNav />

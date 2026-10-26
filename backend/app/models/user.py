@@ -4,7 +4,7 @@ from sqlalchemy import Boolean, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
-from app.core.types import UTCDateTime, utcnow
+from app.core.types import ExactString, UTCDateTime, utcnow
 from app.models.enums import UserRole
 
 
@@ -35,6 +35,8 @@ class OtpRequest(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     phone: Mapped[str] = mapped_column(String(15), index=True)
     code_hash: Mapped[str] = mapped_column(String(64))
+    # Set when the SMS provider generated the code and checks it itself (Message Central).
+    provider_ref: Mapped[str | None] = mapped_column(ExactString(100))
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime)

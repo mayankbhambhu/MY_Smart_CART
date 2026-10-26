@@ -107,10 +107,11 @@ def _seed_stores(db: Session, by_top: dict[str, list[Product]]) -> dict[str, Sto
 
 
 def _seed_users(db: Session, stores: dict[str, Store]) -> None:
-    # Demo staff/admin logins only make sense while codes are shown on screen: with real SMS,
-    # whoever really owns those made-up numbers would get staff access.
-    staff = STAFF_USERS if get_settings().otp_on_screen else []
-    for spec in staff:
+    # Demo accounts only make sense while codes are shown on screen: with real SMS, whoever really
+    # owns those made-up numbers would get staff access (or find a stranger's saved address).
+    if not get_settings().otp_on_screen:
+        return
+    for spec in STAFF_USERS:
         store = stores.get(spec["store_slug"]) if spec["store_slug"] else None
         db.add(
             User(

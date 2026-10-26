@@ -12,7 +12,7 @@ A quick-commerce app in the style of Blinkit / Zepto, with a **Python (FastAPI) 
 ## Features
 
 **Shopping (mobile-first web app, also works on desktop)**
-- Phone number + OTP login with codes sent by SMS (MSG91 or Twilio). On demo deployments the code is shown on screen instead.
+- Phone number + OTP login with codes sent by SMS (Message Central, MSG91 or Twilio). On demo deployments the code is shown on screen instead.
 - A **Delivery / Pickup / In-store** switch in the header changes the whole app
 - "Delivery in 8 minutes" based on your location, serviceability check, saved addresses
 - Home banners, category grid, product rails, category pages with a sidebar, product pages
@@ -26,6 +26,7 @@ A quick-commerce app in the style of Blinkit / Zepto, with a **Python (FastAPI) 
 - Each payment is checked three ways: the Checkout signature, a call to Razorpay's API, and a signed webhook. It's recorded exactly once even when all three arrive together. A lost callback is picked up by the webhook or the "Already paid? Check again" button.
 - Cancelling a paid order refunds it through Razorpay. A payment that arrives after an order expired, or after the bill was paid at the counter, is refunded automatically.
 - Without Razorpay keys, a built-in **test checkout** stands in so the whole flow can be tried. No money moves.
+- Terms, privacy, refund, shipping, pricing and contact pages, filled in from your business details. Razorpay checks for these before it enables live payments.
 
 **Scheduled pickup**
 - Pick a store and a 30-minute slot for today or the next two days. Slots follow the store's pickup hours, a 30-minute packing lead time and a per-slot capacity.
@@ -52,7 +53,7 @@ A quick-commerce app in the style of Blinkit / Zepto, with a **Python (FastAPI) 
 | Backend | Python 3.12+, FastAPI, SQLAlchemy 2, Pydantic 2, PyJWT, RapidFuzz (fuzzy matching), SQLite locally / PostgreSQL in production |
 | Frontend | React 19, TypeScript, Vite 8, Tailwind CSS 4, React Router 8, TanStack Query, Zustand, lucide icons |
 | Services | Razorpay (payments), MSG91 or Twilio (SMS), Render (hosting) |
-| Quality | pytest (86 tests, run on SQLite and PostgreSQL), ruff, oxlint, strict TypeScript |
+| Quality | pytest (102 tests, run on SQLite, PostgreSQL and MariaDB/MySQL), ruff, oxlint, strict TypeScript |
 
 ## Run it locally
 
@@ -102,35 +103,64 @@ On the free plan the app sleeps after 15 minutes without visitors, and the next 
 
 To run the production setup yourself: `./scripts/render-build.sh`, then `cd backend && uvicorn app.main:app --host 0.0.0.0 --port 8000`. Set `DATABASE_URL`, `SECRET_KEY` and `ENVIRONMENT` first.
 
-## Going live: payments and SMS
+## Going live: real SMS codes and real payments
 
-All of these are environment variables. On Render, add them in the service's **Environment** tab; the app restarts with them.
+Everything is set with environment variables. On Render, add them under the service's **Environment** tab; the app restarts with them. Production mode refuses to start until the required ones are set, so nothing half-configured reaches customers. While you set things up, Render keeps the previous version running.
 
-**1. Razorpay**
-1. Create a [Razorpay](https://razorpay.com) account. In the Dashboard, under **Account & Settings → API Keys**, generate keys. Start in **Test Mode**.
-2. Set `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET`. "Pay online" now opens Razorpay Checkout.
-3. Under **Webhooks**, add `https://<your-app>/api/payments/razorpay/webhook` with the events `payment.captured`, `order.paid` and `payment.failed`. Choose a secret and set the same value as `RAZORPAY_WEBHOOK_SECRET`.
-4. Test with Razorpay's [test UPI IDs](https://razorpay.com/docs/payments/payments/test-upi-details/) (`success@razorpay`, `failure@razorpay`) or their test cards.
-5. Once Razorpay activates your account (KYC), swap in the live keys (`rzp_live_...`) and add the webhook again in Live Mode.
+**Before you start: your catalog and stores.** The products, prices, stores and aisle layouts are sample data from [`backend/app/seed/data.py`](backend/app/seed/data.py) (three Gurugram stores). Replace them with your real stores and products before you take real orders. The database is loaded from that file the first time the app starts with an empty database.
+
+**1. A real database.** Production refuses to run on the temporary built-in database. On Render, open your PostgreSQL database, copy its **Internal Database URL**, and set it as `DATABASE_URL` on the web service. The free Render database expires after 30 days, so upgrade it before you rely on it. See [Database options](#database-options) for MySQL.
+
+**2. Your business details.** Set `BUSINESS_LEGAL_NAME`, `BUSINESS_ADDRESS`, `SUPPORT_EMAIL`, `SUPPORT_PHONE` and `GRIEVANCE_OFFICER` (the person who handles complaints), plus `GSTIN` if you have one. They fill in the policy pages the site serves:
+
+| Page | URL |
+| --- | --- |
+| Terms & Conditions | `/terms` |
+| Privacy Policy | `/privacy` |
+| Cancellation & Refund Policy | `/refund-policy` |
+| Shipping & Delivery Policy | `/shipping-policy` |
+| Pricing & Fees | `/pricing` |
+| Contact Us | `/contact` |
+
+Razorpay checks for these pages before it enables live payments, and India's e-commerce rules expect the seller's details and a grievance officer to be published. The pages are written for how this app works (automatic refunds, 15-minute payment hold, delivery and pickup fees taken from your settings). Read them and adjust [`backend/app/policies.py`](backend/app/policies.py) if you run things differently.
+
+**3. SMS login codes.** In India every business SMS must be DLT-registered. Pick one:
+- **Message Central VerifyNow** (quickest, no DLT registration of your own): it sends the code from its own approved template and checks it. Sign up at [messagecentral.com](https://www.messagecentral.com), then set `SMS_PROVIDER=messagecentral`, `MESSAGECENTRAL_CUSTOMER_ID` (shown in their dashboard, e.g. `C-...`) and `MESSAGECENTRAL_PASSWORD`. If their dashboard says your account uses an email login, also set `MESSAGECENTRAL_EMAIL`. A new code can be requested every 60 seconds.
+- **MSG91** (your own sender name, needs DLT): register your business, sender ID and an OTP template containing `##OTP##` on DLT (MSG91 guides you; it usually takes 1–2 weeks). Then set `SMS_PROVIDER=msg91`, `MSG91_AUTH_KEY` and `MSG91_OTP_TEMPLATE_ID`.
+- **Twilio**: `SMS_PROVIDER=twilio`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM`. Indian numbers still need DLT.
+
+Then log in on the live site with your own number to check that the SMS arrives. Codes are rate-limited per number, per network and overall per hour, which caps your SMS bill if someone abuses the login form.
+
+**4. Razorpay.**
+1. Sign up at [razorpay.com](https://razorpay.com) and complete the KYC (PAN, bank account and business details). When asked for your website and policies, give the URLs from step 2.
+2. Start in **Test Mode**: under **Account & Settings → API Keys** generate keys and set `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET`. Under **Webhooks** add `https://<your-app>/api/payments/razorpay/webhook` with the events `payment.captured`, `order.paid` and `payment.failed`, and set the same secret as `RAZORPAY_WEBHOOK_SECRET`. Pay for a test order with Razorpay's [test UPI IDs](https://razorpay.com/docs/payments/payments/test-upi-details/) (`success@razorpay`, `failure@razorpay`).
+3. Once Razorpay activates your account, switch to **Live Mode**: generate live keys (`rzp_live_...`), add the webhook again in Live Mode, and replace the three values.
 
 Keep Razorpay's default automatic capture. The app captures payments itself if your account is set to manual capture.
 
-**2. SMS login codes**
-- **MSG91** (India): in India, business SMS must come from a DLT-registered sender ID using a DLT-approved template. Create an OTP template containing `##OTP##` in MSG91, then set `SMS_PROVIDER=msg91`, `MSG91_AUTH_KEY` and `MSG91_OTP_TEMPLATE_ID`.
-- **Twilio**: set `SMS_PROVIDER=twilio`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` and `TWILIO_FROM` (a number or a Messaging Service SID). Indian numbers still need DLT registration.
-- Optional: set `WEBOTP_DOMAIN` to your site's domain. Chrome on Android can then fill the code in from the SMS.
+**5. Your admin account.** Set `ADMIN_PHONES` to your mobile number (several numbers can be separated by commas). After the restart, log in with an SMS code to see every store's orders. To make someone store staff, run `python -m app.manage set-role 98XXXXXXXX staff --store sector-29` with `DATABASE_URL` pointing at the database. For Render's database, first allow your IP address under the database's **Access Control**.
 
-Codes are rate-limited per number, per network and overall per hour. That caps the bill if someone tries to pump SMS through the login form. A failed send shows an error and isn't counted.
+**6. Switch to production.** Set `ENVIRONMENT=production`. This is what removes the demo behaviour:
+- Login codes go by SMS only. The demo accounts and "Demo code" button are gone, and the made-up staff numbers lose their access.
+- The test checkout is never offered. "Pay online" uses Razorpay, or is hidden if no keys are set (cash on delivery and pay-at-store keep working).
+- Orders no longer move along by themselves. Your store team moves them from the Store dashboard (`/staff`).
+- The "Demo" banner disappears once SMS is real and Razorpay uses live keys.
 
-**3. Your admin account and staff**
-- Set `ADMIN_PHONES` to your mobile number, or several numbers separated by commas. After the restart, log in with an SMS code to see every store's orders.
-- To make someone store staff, run this from your computer with `DATABASE_URL` pointing at the hosted database (Render shows an External Database URL):
+On Render's free plan the app sleeps after 15 idle minutes and takes about a minute to wake. For real customers, a paid instance avoids that.
+
+## Database options
+
+- **SQLite** (default): a file in `backend/`, no setup. Good on your computer; never for the hosted app, where the disk is wiped on every restart.
+- **PostgreSQL**: what the hosted app uses. Set `DATABASE_URL` to the URL your host gives you (`postgres://` and `postgresql://` both work).
+- **MySQL or MariaDB**: works the same way. For example, with MySQL on your Mac, create a database and point the app at it:
 
   ```bash
-  cd backend && DATABASE_URL='postgresql://...' python -m app.manage set-role 98XXXXXXXX staff --store sector-29
+  mysql -u root -p -e "CREATE DATABASE smartcart CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+  # in backend/.env
+  DATABASE_URL=mysql://root:YOUR_PASSWORD@localhost:3306/smartcart
   ```
 
-**4. Switch to production.** Set `ENVIRONMENT=production` and `SIMULATE_ORDER_PROGRESS=false`, so orders only move when the store team moves them. Production refuses to start without real SMS and a proper `SECRET_KEY`, and never offers the test checkout.
+  Start the backend and it creates the tables and loads the catalog. Your Mac's MySQL is only for running the app on your Mac: the hosted site can't reach a database on your laptop, and exposing one to the internet isn't safe. For a hosted MySQL, use a managed MySQL service and give the app its `mysql://` URL.
 
 ## Configuration
 
@@ -138,10 +168,11 @@ Every setting can be set as an environment variable or in `backend/.env` (see [`
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `DATABASE_URL` | `sqlite:///./smartcart.db` | Any SQLAlchemy URL, e.g. PostgreSQL |
+| `DATABASE_URL` | `sqlite:///./smartcart.db` | SQLite, PostgreSQL (`postgres://...`) or MySQL (`mysql://...`) |
 | `ENVIRONMENT` | `development` | `development`, `test`, `demo` (hosted, codes on screen allowed) or `production` |
 | `SECRET_KEY` | dev value | Signs login tokens (required on any hosted deployment) |
-| `SMS_PROVIDER` | `console` | `console` (code shown on screen), `msg91` or `twilio`, plus their keys (see above) |
+| `SMS_PROVIDER` | `console` | `console` (code shown on screen), `messagecentral`, `msg91` or `twilio`, plus their keys (see above) |
+| `BUSINESS_LEGAL_NAME` / `BUSINESS_ADDRESS` / `SUPPORT_EMAIL` / `SUPPORT_PHONE` / `GRIEVANCE_OFFICER` / `GSTIN` | not set | Your business details on the policy pages (required in production, except `GSTIN`) |
 | `OTP_MAX_PER_PHONE_PER_HOUR` / `OTP_MAX_PER_IP_PER_HOUR` / `OTP_MAX_PER_HOUR` | `5` / `30` / `300` | Login code limits |
 | `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` / `RAZORPAY_WEBHOOK_SECRET` | not set | Razorpay payments (see above) |
 | `SIMULATED_PAYMENTS` | `true` | Test checkout when there are no Razorpay keys (never in production) |
@@ -152,7 +183,7 @@ Every setting can be set as an environment variable or in `backend/.env` (see [`
 | `SMALL_CART_THRESHOLD` / `SMALL_CART_FEE` | `99` / `20` | Small-cart charge (₹) |
 | `HANDLING_FEE` | `2` | Per delivery or pickup order (₹) |
 | `PICKUP_LEAD_MINUTES` | `30` | Earliest pickup slot after ordering |
-| `SIMULATE_ORDER_PROGRESS` | `true` | Moves orders through their statuses automatically (demo) |
+| `SIMULATE_ORDER_PROGRESS` | `true` | Moves orders through their statuses automatically (demo; always off in production) |
 | `CORS_ORIGINS` | Vite dev server | Browser origins allowed to call the API |
 
 ## Project layout
@@ -214,6 +245,7 @@ curl -s localhost:8000/api/instore/1/resolve -H 'content-type: application/json'
 ```bash
 cd backend && pytest && ruff check app tests
 TEST_DATABASE_URL=postgresql://localhost/smartcart_test pytest   # the same suite on PostgreSQL
+TEST_DATABASE_URL=mysql://user:pw@localhost/smartcart_test pytest   # ... or MySQL
 cd frontend && npm run lint && npm run build
 ```
 
