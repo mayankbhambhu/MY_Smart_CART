@@ -36,7 +36,7 @@ class OtpRequest(Base):
     phone: Mapped[str] = mapped_column(String(15), index=True)
     code_hash: Mapped[str] = mapped_column(String(64))
     attempts: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime)
     consumed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
 

@@ -24,3 +24,6 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+
+# Node downloaded by scripts/render-build.sh
+.render/

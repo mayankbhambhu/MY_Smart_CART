@@ -27,7 +27,7 @@ import { Button, Card, Segmented, Sheet, Skeleton } from '../components/ui'
 import { messageOf } from '../lib/api'
 import { cn } from '../lib/cn'
 import { formatINR, plural, shortStoreName, storeHours } from '../lib/format'
-import { resolveShoppingList, useInStoreCheckout, useStoreDetail, useStores } from '../lib/queries'
+import { resolveShoppingList, useAppConfig, useInStoreCheckout, useStoreDetail, useStores } from '../lib/queries'
 import { useShop } from '../lib/shop'
 import type { Product, ResolvedItem, UnmatchedItem } from '../lib/types'
 import { useVoiceInput } from '../lib/voice'
@@ -167,6 +167,8 @@ export default function InStorePage() {
   const stores = useStores()
   const layout = useStoreDetail(storeId)
   const checkout = useInStoreCheckout(storeId)
+  const payments = useAppConfig().data?.payments
+  const payInApp = !payments?.online ? null : payments.provider === 'razorpay' ? (payments.test_mode ? 'UPI / card · test mode' : 'UPI / card') : 'test payment'
   const [params, setParams] = useSearchParams()
 
   const [text, setText] = useState('')
@@ -268,7 +270,8 @@ export default function InStorePage() {
         onSuccess: (order) => {
           useInStore.getState().clear(storeId)
           setPaying(false)
-          navigate(`/orders/${order.id}?placed=1`)
+          // Paying in the app: the bill page opens Razorpay (or the test checkout) right away.
+          navigate(`/orders/${order.id}?placed=1${order.payment_due ? '&pay=1' : ''}`)
         },
         onError: (error) => toast(messageOf(error), 'error'),
       },
@@ -563,9 +566,12 @@ export default function InStorePage() {
           <Button tone="indigo" className="h-12" loading={checkout.isPending} onClick={() => pay('pay_at_store')}>
             <QrCode className="size-5" /> Pay at the counter
           </Button>
-          <Button tone="secondary" className="h-12" disabled={checkout.isPending} onClick={() => pay('online')}>
-            <Smartphone className="size-5" /> Pay now in the app (UPI demo)
-          </Button>
+          {payInApp && (
+            <Button tone="secondary" className="h-12" disabled={checkout.isPending} onClick={() => pay('online')}>
+              <Smartphone className="size-5" /> Pay now in the app
+              <span className="text-xs font-normal text-gray-500">· {payInApp}</span>
+            </Button>
+          )}
         </div>
         <p className="mt-3 text-center text-xs text-gray-500">At the counter, show the bill QR — the cashier scans it, no re-scanning items.</p>
       </Sheet>

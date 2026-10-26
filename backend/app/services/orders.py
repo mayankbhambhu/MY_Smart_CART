@@ -4,7 +4,7 @@ import hmac
 import secrets
 from datetime import datetime, timedelta
 
-from sqlalchemy import case, select, update
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -17,11 +17,9 @@ from app.models import (
     Order,
     OrderItem,
     OrderStatus,
-    OrderStatusEvent,
     PaymentMethod,
     PaymentStatus,
     Store,
-    StoreInventory,
     User,
 )
 from app.models.enums import FINAL_STATUSES
@@ -36,7 +34,9 @@ from app.schemas.order import (
     TimelineStep,
 )
 from app.schemas.store import PickupSlot
+from app.services import payments
 from app.services.catalog import location_label
+from app.services.order_state import apply_status, consume_stock_best_effort, take_stock
 from app.services.pricing import compute_bill, price_lines
 from app.services.stores import delivery_eta_minutes, haversine_km, is_open
 
@@ -44,6 +44,7 @@ S = OrderStatus
 F = FulfillmentType
 
 STATUS_LABELS = {
+    S.PAYMENT_PENDING: "Waiting for payment",
     S.PLACED: "Order placed",
     S.CONFIRMED: "Order confirmed",
     S.PACKING: "Packing your items",
@@ -55,6 +56,9 @@ STATUS_LABELS = {
     S.COMPLETED: "Paid",
     S.CANCELLED: "Cancelled",
 }
+
+# How a step reads once the order has moved past it.
+PAST_STEP_LABELS = {S.AWAITING_PAYMENT: "Bill created"}
 
 FLOWS = {
     F.DELIVERY: [S.PLACED, S.CONFIRMED, S.PACKING, S.OUT_FOR_DELIVERY, S.DELIVERED],
@@ -81,8 +85,8 @@ STAFF_TRANSITIONS = {
 }
 
 CUSTOMER_CANCELLABLE = {
-    F.DELIVERY: {S.PLACED, S.CONFIRMED},
-    F.PICKUP: {S.PLACED, S.CONFIRMED, S.PACKING},
+    F.DELIVERY: {S.PAYMENT_PENDING, S.PLACED, S.CONFIRMED},
+    F.PICKUP: {S.PAYMENT_PENDING, S.PLACED, S.CONFIRMED, S.PACKING},
     F.IN_STORE: {S.AWAITING_PAYMENT},
 }
 
@@ -96,68 +100,10 @@ def new_order_code(db: Session) -> str:
             return code
 
 
-def _reserves_stock(order: Order) -> bool:
-    """Delivery and pickup orders take stock when placed; in-store bills only when paid."""
-    return order.fulfillment_type != F.IN_STORE
-
-
-def _take_stock(db: Session, store_id: int, product_id: int, quantity: int, name: str) -> None:
-    result = db.execute(
-        update(StoreInventory)
-        .where(
-            StoreInventory.store_id == store_id,
-            StoreInventory.product_id == product_id,
-            StoreInventory.stock >= quantity,
-        )
-        .values(stock=StoreInventory.stock - quantity)
-    )
-    if result.rowcount != 1:
-        db.rollback()
-        raise AppError(409, f"{name} just went out of stock. Please update your cart.")
-
-
-def _consume_stock_best_effort(db: Session, order: Order) -> None:
-    """Items already scanned at the counter: decrement without ever going below zero."""
-    for item in order.items:
-        db.execute(
-            update(StoreInventory)
-            .where(
-                StoreInventory.store_id == order.store_id,
-                StoreInventory.product_id == item.product_id,
-            )
-            .values(
-                stock=case(
-                    (StoreInventory.stock >= item.quantity, StoreInventory.stock - item.quantity),
-                    else_=0,
-                )
-            )
-        )
-
-
-def _restock(db: Session, order: Order) -> None:
-    for item in order.items:
-        db.execute(
-            update(StoreInventory)
-            .where(
-                StoreInventory.store_id == order.store_id,
-                StoreInventory.product_id == item.product_id,
-            )
-            .values(stock=StoreInventory.stock + item.quantity)
-        )
-
-
-def apply_status(
-    db: Session, order: Order, status: OrderStatus, at: datetime | None = None, note: str | None = None
-) -> None:
-    order.status = status
-    order.events.append(OrderStatusEvent(status=status, note=note, created_at=at or utcnow()))
-    if status in (S.DELIVERED, S.PICKED_UP, S.COMPLETED):
-        order.payment_status = PaymentStatus.PAID
-    if status == S.CANCELLED:
-        if _reserves_stock(order):
-            _restock(db, order)
-        if order.payment_status == PaymentStatus.PAID:
-            order.payment_status = PaymentStatus.REFUNDED
+def status_label(order: Order) -> str:
+    if order.status == S.AWAITING_PAYMENT and order.payment_method == PaymentMethod.ONLINE:
+        return STATUS_LABELS[S.PAYMENT_PENDING]
+    return STATUS_LABELS[S(order.status)]
 
 
 def create_order(
@@ -175,8 +121,6 @@ def create_order(
     if fulfillment == F.DELIVERY:
         if not store.supports_delivery:
             raise AppError(422, f"{store.name} doesn't deliver")
-        if not is_open(store):
-            raise AppError(409, f"{store.name} is closed right now. Try scheduling a pickup instead.")
         if address is None:
             raise AppError(422, "Please choose a delivery address")
         distance = haversine_km(address.lat, address.lng, store.lat, store.lng)
@@ -184,6 +128,8 @@ def create_order(
             raise AppError(422, f"{store.name} doesn't deliver to this address yet")
         if payment_method == PaymentMethod.PAY_AT_STORE:
             raise AppError(422, "Pay at store is only available for pickup orders")
+        if not is_open(store):  # checked last: it's the only problem that goes away by itself
+            raise AppError(409, f"{store.name} is closed right now. Try scheduling a pickup instead.")
     elif fulfillment == F.PICKUP:
         if slot is None:
             raise AppError(422, "Please choose a pickup slot")
@@ -191,6 +137,8 @@ def create_order(
             raise AppError(422, "Choose 'Pay at store' or pay online for pickup orders")
     elif payment_method == PaymentMethod.COD:
         raise AppError(422, "Pay at the counter or online for in-store purchases")
+    if payment_method == PaymentMethod.ONLINE:
+        payments.require_online_payments()
 
     lines, ctx = price_lines(db, store.id, items, enforce_stock=fulfillment != F.IN_STORE)
     problems = [
@@ -201,7 +149,7 @@ def create_order(
 
     if fulfillment != F.IN_STORE:
         for line in lines:
-            _take_stock(db, store.id, line.product_id, line.quantity, line.product.name)
+            take_stock(db, store.id, line.product_id, line.quantity, line.product.name)
 
     item_total = sum((line.line_total for line in lines), start=to_money(0))
     mrp_total = sum((line.line_mrp_total for line in lines), start=to_money(0))
@@ -257,33 +205,47 @@ def create_order(
         )
 
     db.add(order)
-    if payment_method == PaymentMethod.ONLINE:
-        order.payment_status = PaymentStatus.PAID  # mock gateway: payment always succeeds
     if fulfillment == F.IN_STORE:
         apply_status(db, order, S.AWAITING_PAYMENT)
-        if payment_method == PaymentMethod.ONLINE:
-            # Scan & go: paid in the app, so the bill is closed straight away.
-            _consume_stock_best_effort(db, order)
-            apply_status(db, order, S.COMPLETED, note="Paid in app")
+    elif payment_method == PaymentMethod.ONLINE:
+        # Held for the customer while they pay; the store only sees it once it's paid.
+        apply_status(db, order, S.PAYMENT_PENDING)
     else:
         apply_status(db, order, S.PLACED)
     db.commit()
     return order
 
 
-def cancel_by_customer(db: Session, order: Order) -> None:
-    if order.status not in CUSTOMER_CANCELLABLE[F(order.fulfillment_type)]:
-        raise AppError(409, "This order can no longer be cancelled")
-    apply_status(db, order, S.CANCELLED, note="Cancelled by customer")
+def cancel_order(db: Session, order: Order, note: str) -> None:
+    """Cancels, releases stock and refunds an online payment. If the refund can't be started the
+    whole cancellation is rolled back, so nobody ends up cancelled-but-charged."""
+    apply_status(db, order, S.CANCELLED, note=note)
+    payments.refund_order(order, note)
     db.commit()
 
 
+def _catch_up_on_payment(db: Session, order: Order) -> None:
+    """Before cancelling an unpaid online order, make sure it wasn't paid a moment ago."""
+    if payments.payment_due(order):
+        payments.reconcile_order(db, order)
+
+
+def cancel_by_customer(db: Session, order: Order) -> None:
+    _catch_up_on_payment(db, order)
+    if order.status not in CUSTOMER_CANCELLABLE[F(order.fulfillment_type)]:
+        raise AppError(409, "This order can no longer be cancelled")
+    cancel_order(db, order, "Cancelled by customer")
+
+
 def staff_set_status(db: Session, order: Order, status: OrderStatus, note: str | None) -> None:
+    if status == S.CANCELLED:
+        _catch_up_on_payment(db, order)
     allowed = STAFF_TRANSITIONS[F(order.fulfillment_type)].get(S(order.status), set())
     if status not in allowed:
-        raise AppError(
-            409, f"Can't change a '{STATUS_LABELS[S(order.status)]}' order to '{STATUS_LABELS[status]}'"
-        )
+        raise AppError(409, f"Can't change a '{status_label(order)}' order to '{STATUS_LABELS[status]}'")
+    if status == S.CANCELLED:
+        cancel_order(db, order, note or "Cancelled by the store")
+        return
     apply_status(db, order, status, note=note)
     db.commit()
 
@@ -298,9 +260,13 @@ def complete_order(db: Session, order: Order, pin: str | None) -> None:
             raise AppError(400, "Wrong pickup PIN. Ask the customer to check their app.")
         apply_status(db, order, S.PICKED_UP, note="Handed over at counter")
     elif kind == F.IN_STORE:
+        if payments.payment_due(order) and payments.reconcile_order(db, order):
+            return  # the customer had just paid in the app
         if order.status != S.AWAITING_PAYMENT:
             raise AppError(409, "This bill is already closed")
-        _consume_stock_best_effort(db, order)
+        if order.payment_status != PaymentStatus.PAID:
+            order.payment_method = PaymentMethod.PAY_AT_STORE  # settled at the counter after all
+        consume_stock_best_effort(db, order)
         apply_status(db, order, S.COMPLETED, note="Paid at counter")
     else:
         if order.status != S.OUT_FOR_DELIVERY:
@@ -309,13 +275,24 @@ def complete_order(db: Session, order: Order, pin: str | None) -> None:
     db.commit()
 
 
+def _placed_at(order: Order) -> datetime:
+    """When the order really started: payment time for online orders, else creation time."""
+    for event in order.events:
+        if event.status == S.PLACED:
+            return event.created_at
+    return order.created_at
+
+
 def simulate_progress(db: Session, order: Order, now: datetime | None = None) -> bool:
     """Demo mode: walk delivery/pickup orders through their statuses on a realistic clock.
     Pickup orders still need the PIN handover at the store to be marked picked up."""
-    if not get_settings().simulate_order_progress or order.status in FINAL_STATUSES:
+    flow = FLOWS[F(order.fulfillment_type)]
+    if not get_settings().simulate_order_progress or S(order.status) not in flow:
+        return False
+    if order.status in FINAL_STATUSES:
         return False
     now = now or utcnow()
-    placed = order.created_at
+    placed = _placed_at(order)
     if order.fulfillment_type == F.DELIVERY:
         eta = timedelta(minutes=order.eta_minutes or 12)
         plan = [
@@ -334,12 +311,14 @@ def simulate_progress(db: Session, order: Order, now: datetime | None = None) ->
     else:
         return False
 
-    flow = FLOWS[F(order.fulfillment_type)]
     changed = False
-    for status, at in plan:
-        if now >= at and flow.index(status) > flow.index(S(order.status)):
-            apply_status(db, order, status, at=at)
-            changed = True
+    try:
+        for status, at in plan:
+            if now >= at and flow.index(status) > flow.index(S(order.status)):
+                apply_status(db, order, status, at=at)
+                changed = True
+    except AppError:
+        return False  # the store or customer changed it at the same moment; leave it to them
     if changed:
         db.commit()
     return changed
@@ -354,7 +333,7 @@ def build_timeline(order: Order) -> list[TimelineStep]:
     if order.status == S.CANCELLED:
         steps = [
             TimelineStep(status=s, label=STATUS_LABELS[s], done=True, current=False, at=reached[s])
-            for s in flow
+            for s in [S.PAYMENT_PENDING, *flow]
             if s in reached
         ]
         steps.append(
@@ -368,10 +347,26 @@ def build_timeline(order: Order) -> list[TimelineStep]:
         )
         return steps
 
+    if order.status == S.PAYMENT_PENDING:
+        waiting = TimelineStep(
+            status=S.PAYMENT_PENDING,
+            label=STATUS_LABELS[S.PAYMENT_PENDING],
+            done=False,
+            current=True,
+            at=order.created_at,
+        )
+        return [waiting] + [
+            TimelineStep(status=s, label=STATUS_LABELS[s], done=False, current=False) for s in flow
+        ]
+
     current = flow.index(S(order.status))
     return [
         TimelineStep(
-            status=s, label=STATUS_LABELS[s], done=i <= current, current=i == current, at=reached.get(s)
+            status=s,
+            label=status_label(order) if i == current else PAST_STEP_LABELS.get(s, STATUS_LABELS[s]),
+            done=i <= current,
+            current=i == current,
+            at=reached.get(s),
         )
         for i, s in enumerate(flow)
     ]
@@ -407,9 +402,12 @@ def order_out(order: Order, *, for_staff: bool = False) -> OrderOut:
         code=order.code,
         fulfillment_type=order.fulfillment_type,
         status=status,
-        status_label=STATUS_LABELS[status],
+        status_label=status_label(order),
         payment_method=order.payment_method,
         payment_status=order.payment_status,
+        payment_due=payments.payment_due(order),
+        payment_expires_at=payments.payment_expires_at(order),
+        payment=payments.payment_info(order),
         store=OrderStoreOut.model_validate(order.store),
         delivery_address=order.delivery_address,
         eta_minutes=order.eta_minutes,
@@ -440,7 +438,7 @@ def order_summary(order: Order) -> OrderSummary:
         code=order.code,
         fulfillment_type=order.fulfillment_type,
         status=status,
-        status_label=STATUS_LABELS[status],
+        status_label=status_label(order),
         store_name=order.store.name,
         item_count=order.item_count,
         grand_total=order.grand_total,

@@ -9,9 +9,9 @@ import { Button, Card, EmptyState, PageHeader, Segmented, Sheet, Skeleton } from
 import { messageOf } from '../lib/api'
 import { cn } from '../lib/cn'
 import { formatINR, formatSlot, plural, shortStoreName } from '../lib/format'
-import { useAddresses, usePickupSlots, usePlaceOrder, useQuote } from '../lib/queries'
+import { useAddresses, useAppConfig, usePickupSlots, usePlaceOrder, useQuote } from '../lib/queries'
 import { useShop } from '../lib/shop'
-import type { Address, PaymentMethod, PickupDay, QuoteLine } from '../lib/types'
+import type { Address, AppConfig, PaymentMethod, PickupDay, QuoteLine } from '../lib/types'
 import { useAuth } from '../store/auth'
 import { useCart, useCartSummary, type CartProduct } from '../store/cart'
 import { useLocation } from '../store/location'
@@ -19,15 +19,24 @@ import { toast } from '../store/toast'
 
 type Fulfillment = 'delivery' | 'pickup'
 
-const PAYMENT_OPTIONS: Record<Fulfillment, { value: PaymentMethod; label: string; hint: string }[]> = {
-  delivery: [
-    { value: 'cod', label: 'Cash / UPI on delivery', hint: 'Pay the delivery partner' },
-    { value: 'online', label: 'Pay online now', hint: 'UPI / card (demo, no real charge)' },
-  ],
-  pickup: [
-    { value: 'pay_at_store', label: 'Pay at the store', hint: 'Pay when you collect' },
-    { value: 'online', label: 'Pay online now', hint: 'UPI / card (demo, no real charge)' },
-  ],
+interface PaymentOption {
+  value: PaymentMethod
+  label: string
+  hint: string
+}
+
+const PAY_LATER: Record<Fulfillment, PaymentOption> = {
+  delivery: { value: 'cod', label: 'Cash / UPI on delivery', hint: 'Pay the delivery partner' },
+  pickup: { value: 'pay_at_store', label: 'Pay at the store', hint: 'Pay when you collect' },
+}
+
+function payOnline(config: AppConfig | undefined): PaymentOption | null {
+  if (!config?.payments.online) return null
+  const hint =
+    config.payments.provider === 'razorpay'
+      ? `UPI, cards, netbanking & wallets via Razorpay${config.payments.test_mode ? ' (test mode)' : ''}`
+      : 'Test payment, no real money moves'
+  return { value: 'online', label: 'Pay online now', hint }
 }
 
 function LineRow({ product, qty, line }: { product: CartProduct; qty: number; line?: QuoteLine }) {
@@ -184,12 +193,14 @@ export default function CartPage() {
   const addresses = useAddresses()
   const slots = usePickupSlots(fulfillment === 'pickup' ? storeId : null)
   const place = usePlaceOrder()
+  const online = payOnline(useAppConfig().data)
 
   // A slot only counts for the store it was picked at; payment choice is remembered per mode.
   const [slot, setSlot] = useState<{ storeId: number | null; start: string } | null>(null)
   const slotStart = slot && slot.storeId === storeId ? slot.start : null
   const [payments, setPayments] = useState<Record<Fulfillment, PaymentMethod>>({ delivery: 'cod', pickup: 'pay_at_store' })
-  const payment = payments[fulfillment]
+  const paymentOptions = online ? [PAY_LATER[fulfillment], online] : [PAY_LATER[fulfillment]]
+  const payment = paymentOptions.some((o) => o.value === payments[fulfillment]) ? payments[fulfillment] : PAY_LATER[fulfillment].value
   const setPayment = (method: PaymentMethod) => setPayments((current) => ({ ...current, [fulfillment]: method }))
   const [addressSheet, setAddressSheet] = useState(false)
   const [storeSheet, setStoreSheet] = useState(false)
@@ -258,7 +269,8 @@ export default function CartPage() {
       {
         onSuccess: (order) => {
           useCart.getState().clear()
-          navigate(`/orders/${order.id}?placed=1`, { replace: true })
+          // Online orders are held while the customer pays; the order page opens the payment.
+          navigate(`/orders/${order.id}?placed=1${order.payment_due ? '&pay=1' : ''}`, { replace: true })
         },
         onError: (error) => {
           toast(messageOf(error), 'error')
@@ -284,7 +296,9 @@ export default function CartPage() {
         disabled={!!token && !!blocker}
         onClick={placeOrder}
       >
-        {!token ? 'Login to continue' : (blocker ?? (fulfillment === 'pickup' ? 'Schedule pickup' : 'Place order'))}
+        {!token
+          ? 'Login to continue'
+          : (blocker ?? (payment === 'online' ? 'Proceed to pay' : fulfillment === 'pickup' ? 'Schedule pickup' : 'Place order'))}
         {!blocker && <ChevronRight className="size-5" />}
       </Button>
     </div>
@@ -429,7 +443,7 @@ export default function CartPage() {
               <Wallet className="size-5 text-gray-600" /> Payment
             </h2>
             <div className="space-y-2">
-              {PAYMENT_OPTIONS[fulfillment].map((option) => (
+              {paymentOptions.map((option) => (
                 <label
                   key={option.value}
                   className={cn(

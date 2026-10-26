@@ -1,7 +1,8 @@
+import logging
 from datetime import timedelta
 
-from fastapi import APIRouter
-from sqlalchemy import select
+from fastapi import APIRouter, Request
+from sqlalchemy import func, select
 
 from app.api.deps import CurrentUser, DbSession
 from app.core.config import get_settings
@@ -16,8 +17,9 @@ from app.core.security import (
 from app.core.types import utcnow
 from app.models import OtpRequest, User
 from app.schemas.auth import OtpRequestIn, OtpRequestOut, OtpVerifyIn, TokenOut, UserOut, UserUpdate
-from app.services.notifications import send_otp_sms
+from app.services.sms import SmsError, masked, send_otp
 
+logger = logging.getLogger("smartcart.auth")
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
@@ -29,20 +31,41 @@ def _valid_phone(raw: str) -> str:
 
 
 @router.post("/otp/request", response_model=OtpRequestOut)
-def request_otp(body: OtpRequestIn, db: DbSession):
+def request_otp(body: OtpRequestIn, request: Request, db: DbSession):
     settings = get_settings()
     phone = _valid_phone(body.phone)
     now = utcnow()
 
-    last = db.scalars(
-        select(OtpRequest).where(OtpRequest.phone == phone).order_by(OtpRequest.id.desc()).limit(1)
-    ).first()
-    if last is not None:
-        wait = settings.otp_resend_cooldown_seconds - int((now - last.created_at).total_seconds())
+    # Every SMS costs money, and OTP endpoints are a favourite target for SMS-pumping fraud.
+    client_ip = request.client.host if request.client else "unknown"
+    if not request.app.state.otp_ip_limiter.allow(client_ip):
+        raise AppError(429, "Too many login attempts from your network. Please try again later.")
+    recent = db.scalars(
+        select(OtpRequest.created_at)
+        .where(OtpRequest.phone == phone, OtpRequest.created_at > now - timedelta(hours=1))
+        .order_by(OtpRequest.id.desc())
+    ).all()
+    if recent:
+        wait = settings.otp_resend_cooldown_seconds - int((now - recent[0]).total_seconds())
         if wait > 0:
             raise AppError(429, f"Please wait {wait}s before requesting a new OTP", {"retry_after": wait})
+    if len(recent) >= settings.otp_max_per_phone_per_hour:
+        raise AppError(429, "Too many codes requested for this number. Please try again in an hour.")
+    sent_last_hour = db.scalar(
+        select(func.count()).select_from(OtpRequest).where(OtpRequest.created_at > now - timedelta(hours=1))
+    )
+    if sent_last_hour >= settings.otp_max_per_hour:
+        logger.error("Hourly login-code budget (%s) used up; refusing new codes", settings.otp_max_per_hour)
+        raise AppError(503, "Logins are busy right now. Please try again in a few minutes.")
 
     code = generate_numeric_code(settings.otp_length)
+    try:
+        send_otp(phone, code)
+    except SmsError:
+        logger.exception("Couldn't send a login code to %s", masked(phone))
+        raise AppError(502, "We couldn't send the SMS right now. Please try again in a minute.") from None
+
+    # Stored only once the SMS is on its way, so a failed send never blocks a retry.
     db.add(
         OtpRequest(
             phone=phone,
@@ -52,12 +75,12 @@ def request_otp(body: OtpRequestIn, db: DbSession):
         )
     )
     db.commit()
-    send_otp_sms(phone, code)
     return OtpRequestOut(
         phone=phone,
         expires_in=settings.otp_ttl_seconds,
         resend_in=settings.otp_resend_cooldown_seconds,
-        dev_otp=code if settings.otp_dev_mode else None,
+        delivery="screen" if settings.otp_on_screen else "sms",
+        dev_otp=code if settings.otp_on_screen else None,
     )
 
 

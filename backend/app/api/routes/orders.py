@@ -5,6 +5,7 @@ from app.api.deps import CurrentUser, DbSession
 from app.core.errors import NotFound
 from app.models import Address, FulfillmentType, Order, User
 from app.schemas.order import OrderCreate, OrderOut, OrderSummary
+from app.services import payments
 from app.services.orders import cancel_by_customer, create_order, order_out, order_summary, simulate_progress
 from app.services.slots import resolve_pickup_slot
 from app.services.stores import get_store
@@ -12,11 +13,17 @@ from app.services.stores import get_store
 router = APIRouter(prefix="/orders", tags=["orders"])
 
 
-def _own_order(db: DbSession, user: User, order_id: int) -> Order:
+def own_order(db: DbSession, user: User, order_id: int) -> Order:
     order = db.get(Order, order_id)
     if order is None or order.user_id != user.id:
         raise NotFound("Order")
     return order
+
+
+def _refresh(db: DbSession, order: Order) -> None:
+    """Brings an order up to date before showing it: payment expiry, then demo progress."""
+    payments.expire_if_overdue(db, order)
+    simulate_progress(db, order)
 
 
 @router.post("", response_model=OrderOut, status_code=201)
@@ -51,20 +58,20 @@ def my_orders(user: CurrentUser, db: DbSession, limit: int = Query(default=50, g
         )
     )
     for order in orders:
-        simulate_progress(db, order)
+        _refresh(db, order)
     return [order_summary(o) for o in orders]
 
 
 @router.get("/{order_id}", response_model=OrderOut)
 def get_order(order_id: int, user: CurrentUser, db: DbSession):
-    order = _own_order(db, user, order_id)
-    simulate_progress(db, order)
+    order = own_order(db, user, order_id)
+    _refresh(db, order)
     return order_out(order)
 
 
 @router.post("/{order_id}/cancel", response_model=OrderOut)
 def cancel_order(order_id: int, user: CurrentUser, db: DbSession):
-    order = _own_order(db, user, order_id)
-    simulate_progress(db, order)
+    order = own_order(db, user, order_id)
+    _refresh(db, order)
     cancel_by_customer(db, order)
     return order_out(order)

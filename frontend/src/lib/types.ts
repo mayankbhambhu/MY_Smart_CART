@@ -2,6 +2,7 @@
 
 export type FulfillmentType = 'delivery' | 'pickup' | 'in_store'
 export type OrderStatus =
+  | 'payment_pending'
   | 'placed'
   | 'confirmed'
   | 'packing'
@@ -14,6 +15,7 @@ export type OrderStatus =
   | 'cancelled'
 export type PaymentMethod = 'cod' | 'pay_at_store' | 'online'
 export type PaymentStatus = 'pending' | 'paid' | 'refunded'
+export type PaymentState = 'created' | 'paid' | 'failed' | 'refunded'
 export type UserRole = 'customer' | 'staff' | 'admin'
 
 export interface User {
@@ -25,10 +27,25 @@ export interface User {
   store_id: number | null
 }
 
+export interface AppConfig {
+  app_name: string
+  /** 'screen': demo deployment, the code is shown on the login screen instead of sent by SMS. */
+  otp_delivery: 'sms' | 'screen'
+  payments: {
+    online: boolean
+    provider: 'razorpay' | 'simulated' | null
+    key_id: string | null
+    test_mode: boolean
+  }
+  payment_timeout_minutes: number
+  demo: boolean
+}
+
 export interface OtpRequestResult {
   phone: string
   expires_in: number
   resend_in: number
+  delivery: 'sms' | 'screen'
   dev_otp: string | null
 }
 
@@ -224,6 +241,30 @@ export interface TimelineStep {
   at: string | null
 }
 
+export interface PaymentInfo {
+  provider: string
+  status: PaymentState
+  method: string | null
+  reference: string | null
+  refund_id: string | null
+  error: string | null
+}
+
+/** What Razorpay Checkout (or the test-payment sheet) needs to take a payment. */
+export interface PaymentSession {
+  provider: 'razorpay' | 'simulated'
+  key_id: string | null
+  provider_order_id: string
+  amount: number // paise
+  currency: string
+  order_id: number
+  order_code: string
+  name: string
+  description: string
+  prefill: { name: string | null; contact: string; email: string | null }
+  expires_at: string | null
+}
+
 export interface Order {
   id: number
   code: string
@@ -232,6 +273,9 @@ export interface Order {
   status_label: string
   payment_method: PaymentMethod
   payment_status: PaymentStatus
+  payment_due: boolean
+  payment_expires_at: string | null
+  payment: PaymentInfo | null
   store: { id: number; name: string; address: string; phone: string | null; lat: number; lng: number }
   delivery_address: { label: string; receiver_name: string; receiver_phone: string | null; line: string } | null
   eta_minutes: number | null

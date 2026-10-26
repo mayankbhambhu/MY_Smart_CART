@@ -1,39 +1,24 @@
 from datetime import timedelta
 
-from sqlalchemy import select
-
 from app.core.config import get_settings
-from app.models import Address, Order, Product, StoreInventory, User
+from app.models import Order
+from app.services import orders as orders_service
 from app.services.orders import simulate_progress
-from tests.conftest import DEMO_CUSTOMER, STAFF_DLF, login
-
-
-def _product(db, name: str, unit: str) -> Product:
-    return db.scalars(select(Product).where(Product.name == name, Product.unit_label == unit)).one()
-
-
-def _stock(db, store_id: int, product_id: int) -> int:
-    db.expire_all()
-    return db.scalar(
-        select(StoreInventory.stock).where(
-            StoreInventory.store_id == store_id, StoreInventory.product_id == product_id
-        )
-    )
-
-
-def _address_id(db) -> int:
-    user = db.scalars(select(User).where(User.phone == DEMO_CUSTOMER)).one()
-    return db.scalars(select(Address.id).where(Address.user_id == user.id)).first()
-
-
-def _first_slot(client, store_id: int = 1) -> str:
-    days = client.get(f"/api/stores/{store_id}/pickup-slots").json()
-    return next(slot["start"] for day in days for slot in day["slots"] if slot["available"])
+from tests.conftest import (
+    DEMO_CUSTOMER,
+    STAFF_DLF,
+    find_product,
+    first_slot,
+    home_address_id,
+    login,
+    pay,
+    stock_of,
+)
 
 
 def test_delivery_order_reserves_stock_and_can_be_cancelled(client, db, customer):
-    atta = _product(db, "Aashirvaad Shudh Chakki Atta", "5 kg")
-    before = _stock(db, 1, atta.id)
+    atta = find_product(db, "Aashirvaad Shudh Chakki Atta", "5 kg")
+    before = stock_of(db, 1, atta.id)
 
     res = client.post(
         "/api/orders",
@@ -41,7 +26,7 @@ def test_delivery_order_reserves_stock_and_can_be_cancelled(client, db, customer
         json={
             "store_id": 1,
             "fulfillment_type": "delivery",
-            "address_id": _address_id(db),
+            "address_id": home_address_id(db),
             "payment_method": "cod",
             "items": [{"product_id": atta.id, "quantity": 2}],
         },
@@ -54,18 +39,18 @@ def test_delivery_order_reserves_stock_and_can_be_cancelled(client, db, customer
     assert order["eta_minutes"] >= 8
     assert order["timeline"][0]["done"] and not order["timeline"][1]["done"]
     assert order["items"][0]["location"]["label"].startswith("Aisle 3")
-    assert _stock(db, 1, atta.id) == before - 2
+    assert stock_of(db, 1, atta.id) == before - 2
 
     listed = client.get("/api/orders", headers=customer).json()
     assert listed[0]["code"] == order["code"]
 
     cancelled = client.post(f"/api/orders/{order['id']}/cancel", headers=customer).json()
     assert cancelled["status"] == "cancelled"
-    assert _stock(db, 1, atta.id) == before
+    assert stock_of(db, 1, atta.id) == before
 
 
 def test_delivery_validation(client, db, customer):
-    milk = _product(db, "Amul Taaza Toned Milk", "500 ml")
+    milk = find_product(db, "Amul Taaza Toned Milk", "500 ml")
     base = {"store_id": 1, "fulfillment_type": "delivery", "items": [{"product_id": milk.id, "quantity": 1}]}
 
     no_address = client.post("/api/orders", headers=customer, json={**base, "payment_method": "cod"})
@@ -75,40 +60,57 @@ def test_delivery_validation(client, db, customer):
     wrong_payment = client.post(
         "/api/orders",
         headers=customer,
-        json={**base, "payment_method": "pay_at_store", "address_id": _address_id(db)},
+        json={**base, "payment_method": "pay_at_store", "address_id": home_address_id(db)},
     )
     assert wrong_payment.status_code == 422
 
     too_far = client.post(  # the Sohna Road store is ~6 km away, beyond its 5 km radius
         "/api/orders",
         headers=customer,
-        json={**base, "store_id": 3, "payment_method": "cod", "address_id": _address_id(db)},
+        json={**base, "store_id": 3, "payment_method": "cod", "address_id": home_address_id(db)},
     )
     assert too_far.status_code == 422
 
 
-def test_cannot_order_more_than_in_stock(client, db, customer):
-    milk = _product(db, "Amul Taaza Toned Milk", "500 ml")
-    stock = _stock(db, 1, milk.id)
+def test_closed_store_suggests_pickup(client, db, customer, monkeypatch):
+    monkeypatch.setattr(orders_service, "is_open", lambda store, at=None: False)
+    milk = find_product(db, "Amul Taaza Toned Milk", "500 ml")
     res = client.post(
         "/api/orders",
         headers=customer,
         json={
             "store_id": 1,
             "fulfillment_type": "delivery",
-            "address_id": _address_id(db),
+            "address_id": home_address_id(db),
+            "payment_method": "cod",
+            "items": [{"product_id": milk.id, "quantity": 1}],
+        },
+    )
+    assert res.status_code == 409 and "Try scheduling a pickup" in res.json()["detail"]
+
+
+def test_cannot_order_more_than_in_stock(client, db, customer):
+    milk = find_product(db, "Amul Taaza Toned Milk", "500 ml")
+    stock = stock_of(db, 1, milk.id)
+    res = client.post(
+        "/api/orders",
+        headers=customer,
+        json={
+            "store_id": 1,
+            "fulfillment_type": "delivery",
+            "address_id": home_address_id(db),
             "payment_method": "cod",
             "items": [{"product_id": milk.id, "quantity": stock + 1}],
         },
     )
     assert res.status_code == 409
     assert res.json()["details"]["issues"]
-    assert _stock(db, 1, milk.id) == stock
+    assert stock_of(db, 1, milk.id) == stock
 
 
 def test_scheduled_pickup_flow_with_pin_handover(client, db, customer, staff):
-    bread = _product(db, "Harvest Gold White Bread", "400 g")
-    slot = _first_slot(client)
+    bread = find_product(db, "Harvest Gold White Bread", "400 g")
+    slot = first_slot(client)
     res = client.post(
         "/api/orders",
         headers=customer,
@@ -158,7 +160,7 @@ def test_scheduled_pickup_flow_with_pin_handover(client, db, customer, staff):
 
 
 def test_pickup_validation(client, db, customer):
-    bread = _product(db, "Harvest Gold White Bread", "400 g")
+    bread = find_product(db, "Harvest Gold White Bread", "400 g")
     base = {"store_id": 1, "fulfillment_type": "pickup", "items": [{"product_id": bread.id, "quantity": 1}]}
     assert (
         client.post("/api/orders", headers=customer, json={**base, "payment_method": "online"}).status_code
@@ -167,7 +169,7 @@ def test_pickup_validation(client, db, customer):
     cod = client.post(
         "/api/orders",
         headers=customer,
-        json={**base, "payment_method": "cod", "pickup_slot_start": _first_slot(client)},
+        json={**base, "payment_method": "cod", "pickup_slot_start": first_slot(client)},
     )
     assert cod.status_code == 422
 
@@ -175,19 +177,24 @@ def test_pickup_validation(client, db, customer):
 def test_staff_access_is_scoped(client, db, customer, staff):
     assert client.get("/api/staff/orders", headers=customer).status_code == 403
 
-    bread = _product(db, "Harvest Gold White Bread", "400 g")
+    bread = find_product(db, "Harvest Gold White Bread", "400 g")
     order = client.post(
         "/api/orders",
         headers=customer,
         json={
             "store_id": 1,
             "fulfillment_type": "pickup",
-            "pickup_slot_start": _first_slot(client),
+            "pickup_slot_start": first_slot(client),
             "payment_method": "online",
             "items": [{"product_id": bread.id, "quantity": 1}],
         },
     ).json()
-    assert order["payment_status"] == "paid"
+    assert order["status"] == "payment_pending"
+    # The store only sees an online order once it's paid.
+    assert client.get("/api/staff/orders", headers=staff).json() == []
+    order = pay(client, customer, order["id"])
+    assert order["status"] == "placed" and order["payment_status"] == "paid"
+    assert [o["id"] for o in client.get("/api/staff/orders", headers=staff).json()] == [order["id"]]
 
     other_store = login(client, STAFF_DLF)
     assert client.get("/api/staff/orders", headers=other_store).json() == []
@@ -198,14 +205,14 @@ def test_staff_access_is_scoped(client, db, customer, staff):
 
 
 def test_demo_mode_moves_delivery_orders_along(client, db, customer, monkeypatch):
-    milk = _product(db, "Amul Taaza Toned Milk", "500 ml")
+    milk = find_product(db, "Amul Taaza Toned Milk", "500 ml")
     created = client.post(
         "/api/orders",
         headers=customer,
         json={
             "store_id": 1,
             "fulfillment_type": "delivery",
-            "address_id": _address_id(db),
+            "address_id": home_address_id(db),
             "payment_method": "cod",
             "items": [{"product_id": milk.id, "quantity": 1}],
         },

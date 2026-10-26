@@ -12,15 +12,17 @@ class Base(DeclarativeBase):
 
 
 def make_engine(url: str) -> Engine:
-    is_sqlite = url.startswith("sqlite")
-    engine = create_engine(url, connect_args={"check_same_thread": False} if is_sqlite else {})
-    if is_sqlite:
+    if not url.startswith("sqlite"):
+        # Hosted databases drop idle connections; check each one before handing it out.
+        return create_engine(url, pool_pre_ping=True, pool_recycle=300)
 
-        @event.listens_for(engine, "connect")
-        def _enable_foreign_keys(dbapi_conn, _record):  # pragma: no cover - driver hook
-            cursor = dbapi_conn.cursor()
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.close()
+    engine = create_engine(url, connect_args={"check_same_thread": False})
+
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_conn, _record):  # pragma: no cover - driver hook
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
     return engine
 

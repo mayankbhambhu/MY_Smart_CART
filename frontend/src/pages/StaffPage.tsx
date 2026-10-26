@@ -111,7 +111,13 @@ function OrderCard({ order, onUpdated }: { order: Order; onUpdated?: (order: Ord
 
       <div className="flex items-center justify-between text-sm">
         <span className="text-gray-500">
-          {plural(order.item_count, 'item')} · {order.payment_status === 'paid' ? 'Paid' : order.payment_method === 'cod' ? 'Collect on delivery' : 'Collect at counter'}
+          {plural(order.item_count, 'item')} · {order.payment_status === 'paid'
+            ? 'Paid'
+            : order.payment_method === 'cod'
+              ? 'Collect on delivery'
+              : order.payment_due
+                ? 'Paying in the app (or collect at counter)'
+                : 'Collect at counter'}
         </span>
         <span className="text-lg font-extrabold">{formatINR(order.grand_total)}</span>
       </div>

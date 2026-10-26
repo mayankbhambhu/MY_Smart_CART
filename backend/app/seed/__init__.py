@@ -5,11 +5,13 @@ import random
 import re
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 import app.models  # noqa: F401  (registers every table on Base.metadata)
+from app.core.config import get_settings
 from app.core.database import Base, SessionLocal, engine
+from app.core.security import normalize_phone
 from app.models import (
     Address,
     Category,
@@ -18,6 +20,7 @@ from app.models import (
     StoreAisle,
     StoreInventory,
     User,
+    UserRole,
 )
 from app.seed.data import CATEGORIES, DEMO_CUSTOMER, SECTIONS, STAFF_USERS, STORES
 
@@ -104,7 +107,10 @@ def _seed_stores(db: Session, by_top: dict[str, list[Product]]) -> dict[str, Sto
 
 
 def _seed_users(db: Session, stores: dict[str, Store]) -> None:
-    for spec in STAFF_USERS:
+    # Demo staff/admin logins only make sense while codes are shown on screen: with real SMS,
+    # whoever really owns those made-up numbers would get staff access.
+    staff = STAFF_USERS if get_settings().otp_on_screen else []
+    for spec in staff:
         store = stores.get(spec["store_slug"]) if spec["store_slug"] else None
         db.add(
             User(
@@ -128,12 +134,45 @@ def seed_database(db: Session) -> None:
     logger.info("Seeded %s products across %s stores", products, len(stores))
 
 
+def disable_demo_staff(db: Session) -> None:
+    """Once real SMS is on, the made-up demo staff/admin numbers lose their privileges."""
+    phones = [spec["phone"] for spec in STAFF_USERS]
+    demoted = db.execute(
+        update(User)
+        .where(User.phone.in_(phones), User.role != UserRole.CUSTOMER)
+        .values(role=UserRole.CUSTOMER, store_id=None)
+    ).rowcount
+    db.commit()
+    if demoted:
+        logger.warning("Real SMS is on: removed staff access from %s demo account(s)", demoted)
+
+
+def grant_admins(db: Session, phones: str) -> None:
+    """Gives the numbers in ADMIN_PHONES the admin role, creating their accounts if needed."""
+    for raw in filter(None, (part.strip() for part in phones.split(","))):
+        phone = normalize_phone(raw)
+        if phone is None:
+            logger.error("ADMIN_PHONES: %r isn't a valid Indian mobile number", raw)
+            continue
+        user = db.scalars(select(User).where(User.phone == phone)).first()
+        if user is None:
+            user = User(phone=phone)
+            db.add(user)
+        if user.role != UserRole.ADMIN:
+            user.role = UserRole.ADMIN
+            user.store_id = None
+            logger.info("ADMIN_PHONES: %s******%s is now an admin", phone[:2], phone[-2:])
+    db.commit()
+
+
 def init_db(seed: bool = True, reset: bool = False) -> None:
+    settings = get_settings()
     if reset:
         Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
-    if not seed:
-        return
     with SessionLocal() as db:
-        if db.scalar(select(func.count(Category.id))) == 0:
+        if seed and db.scalar(select(func.count(Category.id))) == 0:
             seed_database(db)
+        if not settings.otp_on_screen:
+            disable_demo_staff(db)
+        grant_admins(db, settings.admin_phones)

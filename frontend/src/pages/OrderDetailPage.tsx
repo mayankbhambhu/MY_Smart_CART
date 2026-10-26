@@ -1,6 +1,6 @@
-import { Navigation, Phone, ReceiptText } from 'lucide-react'
+import { Navigation, Phone, ReceiptText, Wallet } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 
 import { BillDetails, FulfillmentChip, StatusBadge, Timeline } from '../components/order'
@@ -9,6 +9,7 @@ import { Button, Card, EmptyState, ErrorState, PageHeader, Sheet, Spinner } from
 import { ApiError, messageOf } from '../lib/api'
 import { cn } from '../lib/cn'
 import { formatDateTime, formatDay, formatINR, formatTime, plural } from '../lib/format'
+import { usePayOrder, useRefreshPayment } from '../lib/payments'
 import { useCancelOrder, useOrder } from '../lib/queries'
 import type { Order, PaymentMethod } from '../lib/types'
 import { toast } from '../store/toast'
@@ -16,7 +17,17 @@ import { toast } from '../store/toast'
 const PAYMENT_LABELS: Record<PaymentMethod, string> = {
   cod: 'Cash / UPI on delivery',
   pay_at_store: 'Pay at store',
-  online: 'Paid online',
+  online: 'Online',
+}
+
+const METHOD_LABELS: Record<string, string> = {
+  upi: 'UPI',
+  card: 'Card',
+  netbanking: 'Netbanking',
+  wallet: 'Wallet',
+  emi: 'EMI',
+  paylater: 'Pay later',
+  simulated: 'Test payment',
 }
 
 function useNow(intervalMs: number) {
@@ -28,6 +39,18 @@ function useNow(intervalMs: number) {
   return now
 }
 
+function useCountdown(deadline: string | null): number | null {
+  const now = useNow(1000)
+  return deadline ? Math.max(0, Math.floor((new Date(deadline).getTime() - now) / 1000)) : null
+}
+
+const mmss = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+
+/** When the order really started: payment time for online orders, else creation time. */
+function placedAt(order: Order): string {
+  return order.timeline.find((step) => step.status === 'placed')?.at ?? order.created_at
+}
+
 function directionsUrl(order: Order) {
   return `https://www.google.com/maps/dir/?api=1&destination=${order.store.lat},${order.store.lng}`
 }
@@ -36,17 +59,29 @@ function DeliveryHero({ order }: { order: Order }) {
   const now = useNow(30_000)
   const delivered = order.status === 'delivered'
   const cancelled = order.status === 'cancelled'
+  const unpaid = order.status === 'payment_pending'
   const minutesLeft = order.eta_minutes
-    ? Math.max(1, Math.ceil(order.eta_minutes - (now - new Date(order.created_at).getTime()) / 60_000))
+    ? Math.max(1, Math.ceil(order.eta_minutes - Math.max(0, now - new Date(placedAt(order)).getTime()) / 60_000))
     : null
   return (
-    <div className={cn('relative overflow-hidden rounded-3xl p-5 text-white shadow-md', cancelled ? 'bg-gray-500' : 'bg-gradient-to-br from-brand-600 to-emerald-500')}>
+    <div
+      className={cn(
+        'relative overflow-hidden rounded-3xl p-5 text-white shadow-md',
+        cancelled ? 'bg-gray-500' : unpaid ? 'bg-gradient-to-br from-amber-500 to-orange-500' : 'bg-gradient-to-br from-brand-600 to-emerald-500',
+      )}
+    >
       <span className="absolute -bottom-2 right-3 text-7xl" aria-hidden>
-        {delivered ? '🏠' : cancelled ? '🚫' : '🛵'}
+        {delivered ? '🏠' : cancelled ? '🚫' : unpaid ? '💳' : '🛵'}
       </span>
       <p className="text-sm font-semibold text-white/80">{order.status_label}</p>
       <p className="mt-1 text-3xl font-extrabold">
-        {delivered ? 'Delivered!' : cancelled ? 'Order cancelled' : `Arriving in ${minutesLeft} min`}
+        {delivered
+          ? 'Delivered!'
+          : cancelled
+            ? 'Order cancelled'
+            : unpaid
+              ? `Pay to get it in ~${order.eta_minutes} min`
+              : `Arriving in ${minutesLeft} min`}
       </p>
       {order.delivery_address && (
         <p className="mt-2 max-w-[75%] text-sm text-white/90">
@@ -63,13 +98,16 @@ function PickupHero({ order }: { order: Order }) {
   const ready = order.status === 'ready_for_pickup'
   const done = order.status === 'picked_up'
   const cancelled = order.status === 'cancelled'
+  const unpaid = order.status === 'payment_pending'
   const message = ready
     ? 'Your order is packed and waiting at the pickup counter.'
     : done
       ? 'Picked up. Thanks for shopping with us!'
       : cancelled
         ? 'This pickup was cancelled.'
-        : "We'll pack your order just before your slot."
+        : unpaid
+          ? 'Complete the payment to confirm your slot.'
+          : "We'll pack your order just before your slot."
   return (
     <div className={cn('rounded-3xl p-5 shadow-md', cancelled ? 'bg-gray-100' : ready ? 'bg-gradient-to-br from-amber-400 to-orange-400' : 'bg-gradient-to-br from-amber-100 to-orange-50')}>
       <p className="text-sm font-bold uppercase tracking-wider text-amber-900/70">Pickup slot</p>
@@ -79,7 +117,7 @@ function PickupHero({ order }: { order: Order }) {
         </p>
       )}
       <p className="mt-1 text-sm text-gray-800">{message}</p>
-      {!cancelled && !done && order.handover_pin && (
+      {!cancelled && !done && !unpaid && order.handover_pin && (
         <div className="mt-4 flex items-center gap-4 rounded-2xl bg-white p-4 shadow-sm">
           <QRCodeSVG value={`SMARTCART:${order.code}:${order.handover_pin}`} size={104} level="M" />
           <div>
@@ -130,6 +168,95 @@ function InStoreHero({ order }: { order: Order }) {
   )
 }
 
+function PaymentDueCard({ order, paying, onPay }: { order: Order; paying: boolean; onPay: () => void }) {
+  const refresh = useRefreshPayment()
+  const secondsLeft = useCountdown(order.payment_expires_at)
+  const expired = secondsLeft === 0
+  const failure = order.payment?.status === 'failed' ? order.payment.error : null
+  const inStore = order.fulfillment_type === 'in_store'
+  const held = order.fulfillment_type === 'pickup' ? 'your items and pickup slot' : 'your items'
+
+  const checkAgain = () =>
+    refresh.mutate(order.id, {
+      onSuccess: (latest) =>
+        toast(latest.payment_due ? "We haven't received this payment yet" : 'Payment received', latest.payment_due ? 'info' : 'success'),
+      onError: (error) => toast(messageOf(error), 'error'),
+    })
+
+  return (
+    <Card className="ring-2 ring-amber-300">
+      <div className="flex items-start gap-3">
+        <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-amber-100 text-amber-700">
+          <Wallet className="size-5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="font-bold">{inStore ? 'Pay for your bill in the app' : 'Complete your payment'}</p>
+          <p className="text-sm text-gray-600">
+            {inStore
+              ? 'Or show the bill QR at the counter and pay there.'
+              : expired
+                ? 'The time to pay is up. Updating your order…'
+                : secondsLeft != null && (
+                    <>
+                      We're holding {held} for <b className="tabular-nums">{mmss(secondsLeft)}</b>
+                    </>
+                  )}
+          </p>
+          {failure && <p className="mt-1 text-sm font-semibold text-red-600">Last attempt failed: {failure}</p>}
+        </div>
+      </div>
+      <Button block className="mt-3 h-12 text-base" loading={paying} disabled={expired} onClick={onPay}>
+        Pay {formatINR(order.grand_total)}
+      </Button>
+      {order.payment?.provider === 'razorpay' && (
+        <button
+          type="button"
+          onClick={checkAgain}
+          disabled={refresh.isPending}
+          className="mt-2 w-full text-center text-sm font-semibold text-gray-600 hover:text-ink"
+        >
+          {refresh.isPending ? 'Checking…' : 'Already paid? Check again'}
+        </button>
+      )}
+    </Card>
+  )
+}
+
+function PaymentDetails({ order }: { order: Order }) {
+  const payment = order.payment
+  const method = payment?.method && payment.status !== 'failed' ? METHOD_LABELS[payment.method] ?? payment.method : null
+  return (
+    <>
+      <p className="flex justify-between">
+        <span className="text-gray-500">Payment</span>
+        <span className="font-semibold">
+          {PAYMENT_LABELS[order.payment_method]}
+          {method && order.payment_method === 'online' && ` · ${method}`}
+        </span>
+      </p>
+      <p className="flex justify-between">
+        <span className="text-gray-500">Payment status</span>
+        <span className={cn('font-semibold capitalize', order.payment_status === 'paid' ? 'text-brand-700' : order.payment_due ? 'text-amber-700' : 'text-gray-700')}>
+          {order.payment_due ? 'Waiting for payment' : order.payment_status}
+        </span>
+      </p>
+      {payment?.reference && (
+        <p className="flex justify-between gap-4">
+          <span className="text-gray-500">Transaction ID</span>
+          <span className="truncate font-mono text-xs leading-5">{payment.reference}</span>
+        </p>
+      )}
+      {payment?.status === 'refunded' && (
+        <p className="rounded-lg bg-blue-50 px-3 py-2 text-blue-800">
+          {payment.provider === 'razorpay'
+            ? `Refund of ${formatINR(order.grand_total)} started${payment.refund_id ? ` (${payment.refund_id})` : ''}. It reaches your account in 5–7 working days.`
+            : 'Test refund issued. No real money moved.'}
+        </p>
+      )}
+    </>
+  )
+}
+
 const PLACED_MESSAGES = {
   delivery: '🎉 Order placed! Your groceries are on the way.',
   pickup: '✅ Pickup scheduled! Show your PIN at the store counter.',
@@ -138,10 +265,34 @@ const PLACED_MESSAGES = {
 
 export default function OrderDetailPage() {
   const { id } = useParams()
-  const [params] = useSearchParams()
+  const [params, setParams] = useSearchParams()
   const order = useOrder(Number(id))
   const cancel = useCancelOrder(Number(id))
+  const payOrder = usePayOrder()
+  const refreshPayment = useRefreshPayment()
   const [confirming, setConfirming] = useState(false)
+
+  // Arriving from checkout with ?pay=1 opens the payment once. Coming back to an unpaid Razorpay
+  // order (paid in another tab or app?) asks the server to check with Razorpay once.
+  const data = order.data
+  const started = useRef(false)
+  useEffect(() => {
+    if (!data || started.current) return
+    started.current = true
+    if (params.get('pay')) {
+      setParams(
+        (current) => {
+          const next = new URLSearchParams(current)
+          next.delete('pay')
+          return next
+        },
+        { replace: true },
+      )
+      if (data.payment_due) payOrder.mutate(data.id)
+    } else if (data.payment_due && data.payment?.provider === 'razorpay') {
+      refreshPayment.mutate(data.id)
+    }
+  }, [data]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (order.isLoading) return <Spinner />
   if (order.error instanceof ApiError && order.error.status === 401) {
@@ -164,6 +315,8 @@ export default function OrderDetailPage() {
   const o = order.data
   const placedBanner =
     params.get('placed') &&
+    !o.payment_due &&
+    o.status !== 'cancelled' &&
     (o.fulfillment_type === 'in_store' && o.status === 'completed' ? '✅ Payment done. Enjoy your shopping!' : PLACED_MESSAGES[o.fulfillment_type])
 
   return (
@@ -172,6 +325,7 @@ export default function OrderDetailPage() {
       <div className="grid grid-cols-1 gap-4 px-4 lg:grid-cols-[minmax(0,1fr)_380px]">
         <div className="space-y-4">
           {placedBanner && <p className="animate-pop rounded-2xl bg-brand-50 px-4 py-3 font-semibold text-brand-800 ring-1 ring-brand-100">{placedBanner}</p>}
+          {o.payment_due && <PaymentDueCard order={o} paying={payOrder.isPending} onPay={() => payOrder.mutate(o.id)} />}
           {o.fulfillment_type === 'delivery' && <DeliveryHero order={o} />}
           {o.fulfillment_type === 'pickup' && <PickupHero order={o} />}
           {o.fulfillment_type === 'in_store' && <InStoreHero order={o} />}
@@ -214,14 +368,7 @@ export default function OrderDetailPage() {
             <BillDetails bill={o} fulfillment={o.fulfillment_type} />
           </Card>
           <Card className="space-y-1.5 text-sm">
-            <p className="flex justify-between">
-              <span className="text-gray-500">Payment</span>
-              <span className="font-semibold">{PAYMENT_LABELS[o.payment_method]}</span>
-            </p>
-            <p className="flex justify-between">
-              <span className="text-gray-500">Payment status</span>
-              <span className={cn('font-semibold capitalize', o.payment_status === 'paid' ? 'text-brand-700' : 'text-gray-700')}>{o.payment_status}</span>
-            </p>
+            <PaymentDetails order={o} />
             <p className="flex justify-between gap-4">
               <span className="text-gray-500">Store</span>
               <span className="text-right font-semibold">{o.store.name}</span>
@@ -238,7 +385,8 @@ export default function OrderDetailPage() {
       <Sheet open={confirming} onClose={() => setConfirming(false)} title="Cancel this order?">
         <p className="text-sm text-gray-600">
           {o.fulfillment_type === 'pickup' ? 'Your pickup slot will be released.' : "We'll stop processing it right away."}
-          {o.payment_status === 'paid' && ' Your payment will be refunded.'}
+          {o.payment_status === 'paid' && o.payment_method === 'online' && ' Your payment will be refunded.'}
+          {o.payment_due && ' Nothing has been charged.'}
         </p>
         <div className="mt-4 grid grid-cols-2 gap-2">
           <Button tone="secondary" onClick={() => setConfirming(false)}>

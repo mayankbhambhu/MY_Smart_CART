@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from app.models.enums import UserRole
@@ -12,7 +14,8 @@ class OtpRequestOut(Schema):
     phone: str
     expires_in: int
     resend_in: int
-    # Only populated when OTP_DEV_MODE is on (no SMS provider configured).
+    delivery: Literal["sms", "screen"]
+    # Only set when SMS_PROVIDER=console (development / demo): the login screen shows the code.
     dev_otp: str | None = None
 
 

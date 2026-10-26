@@ -16,5 +16,5 @@ Where things live:
 
 - `src/pages/`: one file per screen (home, category, search, product, cart/checkout, in-store, orders, staff…)
 - `src/components/`: header and navigation, product cards, store map, sheets, order widgets
-- `src/lib/`: API client and query hooks, types that mirror the backend schemas, formatting, voice input
+- `src/lib/`: API client and query hooks, payments (Razorpay Checkout and the test checkout), types that mirror the backend schemas, formatting, voice input
 - `src/store/`: cart, shopping mode and location, in-store lists, and session (kept in localStorage)

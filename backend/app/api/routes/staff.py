@@ -3,7 +3,7 @@ from sqlalchemy import select
 
 from app.api.deps import DbSession, StaffUser
 from app.core.errors import AppError, NotFound
-from app.models import FulfillmentType, Order, User, UserRole
+from app.models import FulfillmentType, Order, OrderStatus, User, UserRole
 from app.models.enums import FINAL_STATUSES
 from app.schemas.order import CompleteIn, OrderOut, StatusUpdateIn
 from app.schemas.store import StoreOut
@@ -45,7 +45,13 @@ def store_orders(
     store_id: int | None = None,
     limit: int = Query(default=100, ge=1, le=500),
 ):
-    stmt = select(Order).order_by(Order.created_at.desc()).limit(limit)
+    # Orders still waiting for online payment aren't real orders yet, so the store doesn't see them.
+    stmt = (
+        select(Order)
+        .where(Order.status != OrderStatus.PAYMENT_PENDING)
+        .order_by(Order.created_at.desc())
+        .limit(limit)
+    )
     scope = _scope_store_id(staff, store_id)
     if scope is not None:
         stmt = stmt.where(Order.store_id == scope)

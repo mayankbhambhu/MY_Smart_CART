@@ -6,6 +6,7 @@ import { api } from './api'
 import type {
   Address,
   AddressInput,
+  AppConfig,
   CartLine,
   CategoryPageData,
   CategoryTree,
@@ -27,6 +28,10 @@ import type {
 } from './types'
 
 const MINUTE = 60_000
+
+/** How this deployment is set up: SMS or on-screen login codes, Razorpay or test payments. */
+export const useAppConfig = () =>
+  useQuery({ queryKey: ['config'], queryFn: () => api<AppConfig>('/config'), staleTime: Infinity })
 
 // ---- catalog ---------------------------------------------------------------------------
 

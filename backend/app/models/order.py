@@ -1,5 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from sqlalchemy import JSON, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -9,6 +10,9 @@ from app.core.types import Money, UTCDateTime, utcnow
 from app.models.enums import OrderStatus, PaymentStatus
 from app.models.store import Store
 from app.models.user import User
+
+if TYPE_CHECKING:
+    from app.models.payment import Payment
 
 
 class Order(Base):
@@ -52,10 +56,17 @@ class Order(Base):
     events: Mapped[list["OrderStatusEvent"]] = relationship(
         back_populates="order", cascade="all, delete-orphan", order_by="OrderStatusEvent.id"
     )
+    payments: Mapped[list["Payment"]] = relationship(
+        back_populates="order", cascade="all, delete-orphan", order_by="Payment.id"
+    )
 
     @property
     def item_count(self) -> int:
         return sum(item.quantity for item in self.items)
+
+    @property
+    def latest_payment(self) -> "Payment | None":
+        return self.payments[-1] if self.payments else None
 
 
 class OrderItem(Base):

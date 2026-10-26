@@ -7,6 +7,7 @@ from app.models.enums import FulfillmentType, OrderStatus, PaymentMethod, Paymen
 from app.schemas.cart import CartLineIn
 from app.schemas.catalog import ShelfLocation
 from app.schemas.common import Money, Schema
+from app.schemas.payment import PaymentInfo
 
 
 class OrderCreate(BaseModel):
@@ -62,6 +63,9 @@ class OrderOut(Schema):
     status_label: str
     payment_method: PaymentMethod
     payment_status: PaymentStatus
+    payment_due: bool = False  # online payment still to be made (see payment_expires_at)
+    payment_expires_at: datetime | None = None
+    payment: PaymentInfo | None = None  # latest online payment, if any
     store: OrderStoreOut
     delivery_address: dict | None
     eta_minutes: int | None

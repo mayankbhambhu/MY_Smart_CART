@@ -6,3 +6,7 @@ pydantic-settings==2.16.1
 pyjwt==2.15.1
 rapidfuzz==3.14.6
 tzdata==2026.5
+# Outbound HTTPS to Razorpay and the SMS gateway (also used by the FastAPI test client)
+httpx2==2.16.0
+# PostgreSQL driver for hosted deployments (SQLite needs nothing extra)
+psycopg[binary]==3.3.6

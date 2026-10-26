@@ -1,0 +1,40 @@
+# Render Blueprint: in the Render Dashboard choose New → Blueprint and pick this repository.
+# It creates the app (FastAPI serving the built React app) and a PostgreSQL database, and redeploys
+# on every push to the branch below.
+#
+# It starts in demo mode: login codes are shown on screen and payments are simulated. To go live, add
+# these in the service's Environment settings (see README → "Going live"):
+#   SMS_PROVIDER=msg91, MSG91_AUTH_KEY, MSG91_OTP_TEMPLATE_ID (or the TWILIO_* settings)
+#   RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, RAZORPAY_WEBHOOK_SECRET
+#   ADMIN_PHONES=<your mobile number>, then ENVIRONMENT=production
+#
+# Free plan: the app sleeps after 15 idle minutes (the next visit takes about a minute) and the free
+# database expires 30 days after it's created unless you upgrade it.
+services:
+  - type: web
+    name: smart-cart
+    runtime: python
+    plan: free
+    region: singapore
+    branch: claude/quick-commerce-scheduled-pickup-7k33uo
+    buildCommand: ./scripts/render-build.sh
+    startCommand: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips '*'
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: smart-cart-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ENVIRONMENT
+        value: demo
+      - key: SMS_PROVIDER
+        value: console
+
+databases:
+  - name: smart-cart-db
+    plan: free
+    region: singapore
+    databaseName: smartcart
+    user: smartcart

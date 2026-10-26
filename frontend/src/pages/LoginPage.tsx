@@ -7,11 +7,12 @@ import { Logo } from '../components/layout'
 import { Button } from '../components/ui'
 import { api, messageOf } from '../lib/api'
 import { formatPhone } from '../lib/format'
-import { useUpdateProfile } from '../lib/queries'
+import { useAppConfig, useUpdateProfile } from '../lib/queries'
 import type { OtpRequestResult, Session } from '../lib/types'
 import { isStaff, useAuth } from '../store/auth'
 import { toast } from '../store/toast'
 
+// Only offered on demo deployments, where codes are shown on screen instead of sent by SMS.
 const DEMO_ACCOUNTS = [
   { phone: '9876543210', label: 'Demo customer', hint: 'has a saved address' },
   { phone: '9000000001', label: 'Store staff', hint: 'Sector 29 store' },
@@ -22,11 +23,22 @@ function safeNext(value: string | null): string {
   return value && value.startsWith('/') && !value.startsWith('//') ? value : '/'
 }
 
+/** Chrome on Android can read the code from the SMS (WebOTP) if the server adds the "@domain #code" line. */
+function readCodeFromSms(signal: AbortSignal): Promise<string | null> {
+  if (!('OTPCredential' in window)) return Promise.resolve(null)
+  const options = { otp: { transport: ['sms'] }, signal } as unknown as CredentialRequestOptions
+  return navigator.credentials
+    .get(options)
+    .then((credential) => (credential as (Credential & { code?: string }) | null)?.code ?? null)
+    .catch(() => null) // dismissed, timed out or aborted: the customer types it instead
+}
+
 export default function LoginPage() {
   const navigate = useNavigate()
   const [params] = useSearchParams()
   const next = safeNext(params.get('next'))
   const setSession = useAuth((s) => s.setSession)
+  const codesOnScreen = useAppConfig().data?.otp_delivery === 'screen'
 
   const [step, setStep] = useState<'phone' | 'otp' | 'name'>('phone')
   const [phone, setPhone] = useState('')
@@ -71,6 +83,18 @@ export default function LoginPage() {
 
   const saveName = useUpdateProfile()
 
+  useEffect(() => {
+    if (step !== 'otp' || sent?.delivery !== 'sms') return
+    const controller = new AbortController()
+    readCodeFromSms(controller.signal).then((code) => {
+      if (code && !controller.signal.aborted) {
+        setOtp(code)
+        verify.mutate(code)
+      }
+    })
+    return () => controller.abort()
+  }, [step, sent]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const submitPhone = (event: FormEvent) => {
     event.preventDefault()
     requestOtp.mutate(phone)
@@ -90,7 +114,16 @@ export default function LoginPage() {
           </h1>
           <p className="mt-1 text-sm text-gray-500">
             {step === 'phone' && 'Groceries in minutes, pickup on your schedule, and in-store help.'}
-            {step === 'otp' && `We sent a ${sent?.dev_otp?.length ?? 6}-digit code to ${formatPhone(phone)}`}
+            {step === 'otp' &&
+              (sent?.delivery === 'sms' ? (
+                <>
+                  We've sent a 6-digit code by SMS to <span className="whitespace-nowrap">{formatPhone(phone)}</span>
+                </>
+              ) : (
+                <>
+                  Demo mode: no SMS is sent to <span className="whitespace-nowrap">{formatPhone(phone)}</span>. Use the code below.
+                </>
+              ))}
             {step === 'name' && 'So the store knows who is picking up.'}
           </p>
         </div>
@@ -113,25 +146,27 @@ export default function LoginPage() {
             <Button type="submit" block className="h-12 text-base" loading={requestOtp.isPending} disabled={phone.length !== 10}>
               Continue
             </Button>
-            <div className="rounded-2xl bg-gray-50 p-3">
-              <p className="mb-2 text-xs font-bold uppercase tracking-wider text-gray-500">Demo accounts</p>
-              <div className="space-y-1.5">
-                {DEMO_ACCOUNTS.map((account) => (
-                  <button
-                    key={account.phone}
-                    type="button"
-                    onClick={() => setPhone(account.phone)}
-                    className="flex w-full items-center justify-between rounded-lg bg-white px-3 py-2 text-left text-sm ring-1 ring-black/5 hover:ring-brand-300"
-                  >
-                    <span>
-                      <span className="font-semibold">{account.label}</span>
-                      <span className="block text-xs text-gray-500">{account.hint}</span>
-                    </span>
-                    <span className="font-mono text-xs text-gray-500">{account.phone}</span>
-                  </button>
-                ))}
+            {codesOnScreen && (
+              <div className="rounded-2xl bg-gray-50 p-3">
+                <p className="mb-2 text-xs font-bold uppercase tracking-wider text-gray-500">Demo accounts</p>
+                <div className="space-y-1.5">
+                  {DEMO_ACCOUNTS.map((account) => (
+                    <button
+                      key={account.phone}
+                      type="button"
+                      onClick={() => setPhone(account.phone)}
+                      className="flex w-full items-center justify-between rounded-lg bg-white px-3 py-2 text-left text-sm ring-1 ring-black/5 hover:ring-brand-300"
+                    >
+                      <span>
+                        <span className="font-semibold">{account.label}</span>
+                        <span className="block text-xs text-gray-500">{account.hint}</span>
+                      </span>
+                      <span className="font-mono text-xs text-gray-500">{account.phone}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
           </form>
         )}
 
@@ -161,7 +196,7 @@ export default function LoginPage() {
                 className="flex w-full items-center justify-center gap-2 rounded-xl bg-amber-50 px-3 py-2.5 text-sm text-amber-800 ring-1 ring-amber-200"
               >
                 <KeyRound className="size-4" />
-                Dev mode: your code is <b className="font-mono tracking-widest">{sent.dev_otp}</b> · tap to use
+                Demo code: <b className="font-mono tracking-widest">{sent.dev_otp}</b> · tap to use
               </button>
             )}
             <Button type="submit" block className="h-12 text-base" loading={verify.isPending} disabled={otp.length < 4}>

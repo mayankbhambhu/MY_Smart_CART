@@ -18,6 +18,7 @@ const STATUS_TONES: Partial<Record<OrderStatus, string>> = {
   ready_for_pickup: 'bg-amber-500 text-white',
   out_for_delivery: 'bg-brand-100 text-brand-800',
   awaiting_payment: 'bg-indigo-100 text-indigo-800',
+  payment_pending: 'bg-amber-100 text-amber-800',
 }
 
 export function StatusBadge({ status, label }: { status: OrderStatus; label: string }) {

@@ -17,6 +17,7 @@ import { Link, NavLink, Outlet, ScrollRestoration, useLocation as useRoute, useN
 
 import { cn } from '../lib/cn'
 import { formatINR, plural, shortStoreName } from '../lib/format'
+import { useAppConfig } from '../lib/queries'
 import { useShop } from '../lib/shop'
 import { useAuth } from '../store/auth'
 import { useCartSummary } from '../store/cart'
@@ -25,6 +26,7 @@ import { useLocation, type ShopMode } from '../store/location'
 import { LocationSheet, StoreSheet } from './LocationSheets'
 import { ProductImage } from './product'
 import { ShopProvider } from './ShopContext'
+import { TestPaymentSheet } from './TestPaymentSheet'
 import { Toaster } from './Toaster'
 
 const MODE_THEME: Record<ShopMode, { header: string; accent: string; label: string }> = {
@@ -348,10 +350,23 @@ function BottomNav() {
   )
 }
 
+/** Tells testers what isn't real on this deployment. */
+function DemoBanner() {
+  const config = useAppConfig().data
+  if (!config) return null
+  const notes: string[] = []
+  if (config.otp_delivery === 'screen') notes.push('login codes show on screen')
+  if (config.payments.provider === 'simulated') notes.push('payments are simulated, no real money moves')
+  else if (config.payments.test_mode) notes.push('Razorpay test mode, no real money moves')
+  if (notes.length === 0) return null
+  return <p className="bg-ink px-4 py-1.5 text-center text-xs font-medium text-white">Demo · {notes.join(' · ')}</p>
+}
+
 export function AppShell() {
   return (
     <ShopProvider>
       <div className="min-h-dvh">
+        <DemoBanner />
         <Header />
         <main className="mx-auto max-w-6xl pb-40 md:pb-16">
           <Outlet />
@@ -359,6 +374,7 @@ export function AppShell() {
         <CartBar />
         <BottomNav />
         <Toaster />
+        <TestPaymentSheet />
       </div>
       <ScrollRestoration />
     </ShopProvider>

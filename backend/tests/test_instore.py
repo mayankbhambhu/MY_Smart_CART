@@ -2,6 +2,7 @@ from sqlalchemy import select
 
 from app.models import Product, StoreInventory
 from app.services.matching import parse_chunk, walking_route
+from tests.conftest import pay
 
 
 def _resolve(client, text: str, store_id: int = 1) -> dict:
@@ -128,7 +129,7 @@ def test_counter_checkout_and_cashier_verification(client, db, customer, staff):
     assert stock_after == stock_before - 2
 
 
-def test_pay_in_app_closes_the_bill_immediately(client, customer):
+def test_pay_in_app_closes_the_bill_once_paid(client, customer):
     result = _resolve(client, "bread")
     item = result["items"][0]
     bill = client.post(
@@ -136,8 +137,13 @@ def test_pay_in_app_closes_the_bill_immediately(client, customer):
         headers=customer,
         json={"items": [{"product_id": item["product"]["id"], "quantity": 1}], "payment_method": "online"},
     ).json()
+    assert bill["status"] == "awaiting_payment" and bill["payment_due"]
+    assert bill["status_label"] == "Waiting for payment"
+
+    bill = pay(client, customer, bill["id"])
     assert bill["status"] == "completed"
     assert bill["payment_status"] == "paid"
+    assert bill["payment"]["status"] == "paid" and bill["payment"]["reference"].startswith("sim_pay_")
 
 
 def test_resolve_requires_something_to_look_up(client):
