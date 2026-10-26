@@ -95,7 +95,7 @@ Any other valid 10-digit mobile number signs up a new customer. These accounts o
 The repository includes a [Render Blueprint](render.yaml). It sets up one web service, where FastAPI serves the API and the built React app from the same address, plus a PostgreSQL database. Every push to the branch redeploys. If you merge this work into another branch, change `branch:` in `render.yaml` to match.
 
 1. Sign in at [render.com](https://render.com) with GitHub and allow access to this repository.
-2. Choose **New → Blueprint**, pick this repository and the branch that contains `render.yaml` (`claude/quick-commerce-scheduled-pickup-7k33uo` until it's merged into your main branch), then apply. The build runs [`scripts/render-build.sh`](scripts/render-build.sh) to install Python packages and build the frontend. The first deploy takes a few minutes.
+2. Choose **New → Blueprint**, pick this repository and the `main` branch, then apply. The build runs [`scripts/render-build.sh`](scripts/render-build.sh) to install Python packages and build the frontend. The first deploy takes a few minutes.
 3. Open `https://<service-name>.onrender.com`. It starts in **demo mode**: login codes show on screen and payments use the test checkout. A banner at the top says so.
 
 On the free plan the app sleeps after 15 minutes without visitors, and the next visit takes about a minute to wake it. The free database expires 30 days after it's created unless you upgrade it. Razorpay retries webhooks, so payments made while the app sleeps are still recorded.
