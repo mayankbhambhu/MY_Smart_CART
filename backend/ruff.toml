@@ -1,0 +1,12 @@
+line-length = 110
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[lint.per-file-ignores]
+# The demo catalog is a data table; one product per line reads best.
+"app/seed/data.py" = ["E501"]
+
+[format]
+exclude = ["app/seed/data.py"]

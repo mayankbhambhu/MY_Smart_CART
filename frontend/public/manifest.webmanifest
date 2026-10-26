@@ -1,0 +1,10 @@
+{
+  "name": "Smart Cart",
+  "short_name": "Smart Cart",
+  "description": "Groceries in minutes. Schedule a pickup, or find every item's aisle when you shop in store.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#0c831f",
+  "icons": [{ "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
